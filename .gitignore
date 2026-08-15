@@ -1,0 +1,9 @@
+node_modules/
+dist/
+apps/desktop/release/
+*.log
+.env
+data/
+apps/server/data/
+botcf_contract_result.txt
+*.key

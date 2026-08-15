@@ -1,0 +1,23 @@
+{
+  "name": "botcf-local",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/server",
+    "apps/web",
+    "apps/desktop",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w apps/web && npm run build -w apps/server",
+    "dev:server": "npm run dev -w apps/server",
+    "dev:web": "npm run dev -w apps/web",
+    "desktop": "npm run build && npm run start -w apps/desktop",
+    "dist:desktop": "npm run build && npm run bundle -w apps/server && npm run dist -w apps/desktop",
+    "test": "npm run test -w apps/server",
+    "start": "npm run start -w apps/server"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

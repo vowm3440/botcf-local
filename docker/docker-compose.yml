@@ -1,0 +1,32 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: botcf-local
+    # Loopback only — never exposed to LAN or WAN.
+    ports:
+      - "127.0.0.1:7788:7788"
+    environment:
+      - HOST=0.0.0.0
+      - BOTCF_DATA_DIR=/data
+      # - OMP_GITHUB_REPO=owner/repo   # enable OMP runtime auto-update
+      # - OMP_CHANNEL=fast             # fast | stable | experimental
+    volumes:
+      - ../data:/data
+      # User explicitly chooses which project directories enter the container:
+      # - /path/to/your/project:/workspaces
+    user: "1001:1001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7788/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

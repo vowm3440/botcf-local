@@ -1,0 +1,50 @@
+{
+  "name": "botcf-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BotCF 本地控制台桌面版",
+  "author": "botcf-local",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^43.4.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "local.botcf.console",
+    "productName": "BotCF-Local",
+    "electronVersion": "43.4.0",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../server/dist/server.bundle.cjs",
+        "to": "server/server.bundle.cjs"
+      },
+      {
+        "from": "../web/dist",
+        "to": "web"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
