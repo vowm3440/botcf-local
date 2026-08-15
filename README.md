@@ -39,6 +39,13 @@ npm run dist:desktop # 产出 apps/desktop/release/BotCF-Local Setup x.y.z.exe
 安装包内置 Electron 运行时并使用 esbuild 单文件服务端 bundle,**最终用户无需安装 Node**。
 数据目录:`%APPDATA%/botcf-desktop/data`。
 
+#### Windows SmartScreen(未签名安装包)
+
+当前安装包未使用 EV/OV 代码签名证书,首次下载可能显示「Windows 已保护你的电脑」。
+仅从项目发布渠道获取安装包,先用 `Get-FileHash -Algorithm SHA256 "<安装包路径>"` 校验发布页摘要;
+摘要一致时可点击「更多信息」→「仍要运行」。不要关闭 SmartScreen 或修改系统安全策略。
+面向公众发布前应为安装包和卸载器配置受信任的 Authenticode 签名。
+
 ### Docker
 
 ```bash
@@ -48,11 +55,12 @@ docker compose up -d   # 仅绑定 127.0.0.1:7788
 
 容器非 root、`cap_drop: ALL`、只读根文件系统(仅 /data、/tmp 可写)。
 项目目录需要显式添加 volume 才会进入容器。
+多架构离线产物可用 `docker buildx build --platform linux/amd64,linux/arm64 --output type=oci,dest=botcf-local-multiarch.tar -f docker/Dockerfile .` 构建。
 
 ## OMP 配置
 
-界面顶部 OMP 区域点击「配置仓库」粘贴 OMP 的 GitHub 仓库(`owner/repo`),
-或设置环境变量 `OMP_GITHUB_REPO`。配置后更新器每 10 分钟检查上游 Release:
+界面顶部 OMP 区域可配置固定的官方仓库 `can1357/oh-my-pi`,
+或设置 `OMP_GITHUB_REPO=can1357/oh-my-pi`。其他仓库会被拒绝。更新器每 10 分钟检查 Release:
 
 | 通道 | 行为 |
 |------|------|
@@ -60,8 +68,8 @@ docker compose up -d   # 仅绑定 127.0.0.1:7788
 | stable | 延迟 24 小时 |
 | experimental | 立即安装 |
 
-版本布局:`/data/omp/versions/<tag>/`,`current`/`previous` 链接切换,
-`update-state.json` 记录状态;健康检查失败自动回滚 previous。
+版本布局:`/data/omp/versions/<tag>/`,`current`/`previous` 链接切换。
+安装前强制校验版本标签和 64 位 SHA256(含已有缓存),安装后执行握手、set_model、真实 prompt;失败自动回滚并复测 previous。
 
 ## 安全设计
 
@@ -69,6 +77,7 @@ docker compose up -d   # 仅绑定 127.0.0.1:7788
 - 会话/Key 密文存 SQLite(AES-256-GCM),密钥在 `data/secrets/master.key`(0600)
 - 日志自动遮盖密码、Cookie、Authorization、`sk-` Key
 - 所有监听仅绑定 127.0.0.1;Docker 端口映射同样只绑回环
+- 控制面强制回环 Host 与同源 Origin;凭据代理使用每进程 256-bit capability 并绑定当前模型
 - 分组切换记录 `session_routes`,旧会话保留原路由,避免账单混淆
 
 ## 目录结构
@@ -84,7 +93,7 @@ docs/         BotCF 管理接口契约(实测)
 ## 测试
 
 ```bash
-npm test   # vitest:脱敏、能力解析、路由分类、updater 状态机、SSE 解析
+npm test   # vitest:74 个测试,覆盖脱敏、代理授权、能力解析、路由、updater、SSE/会话解析
 ```
 
 ## 故障排查

@@ -1,19 +1,20 @@
 # ---- build stage -----------------------------------------------------------
-FROM node:22-alpine AS build
+FROM node:22-alpine@sha256:ab07539e0988b63558ff621f5fbe1077054c39d9809112974fb79993949d41cd AS build
 
 WORKDIR /repo
 
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
-RUN npm install --workspaces --include-workspace-root
+COPY apps/desktop/package.json apps/desktop/
+RUN npm ci --workspaces --include-workspace-root
 
 COPY . .
 RUN npm run build -w apps/web && npm run build -w apps/server
 RUN npm prune --omit=dev --workspaces --include-workspace-root
 
 # ---- runtime stage ---------------------------------------------------------
-FROM node:22-alpine
+FROM node:22-alpine@sha256:ab07539e0988b63558ff621f5fbe1077054c39d9809112974fb79993949d41cd
 
 RUN addgroup -g 1001 app && adduser -u 1001 -G app -s /sbin/nologin -D app \
     && mkdir -p /data /workspaces && chown -R app:app /data /workspaces

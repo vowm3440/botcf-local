@@ -1,5 +1,6 @@
 import path from 'node:path'
 import os from 'node:os'
+import crypto from 'node:crypto'
 
 const DATA_DIR = process.env.BOTCF_DATA_DIR ?? path.resolve(process.cwd(), 'data')
 
@@ -17,6 +18,8 @@ export const config = {
   secretsDir: path.join(DATA_DIR, 'secrets'),
   masterKeyPath: path.join(DATA_DIR, 'secrets', 'master.key'),
   ompDir: path.join(DATA_DIR, 'omp'),
+  /** Per-process capability presented by OMP to the loopback credential proxy. */
+  proxyToken: crypto.randomBytes(32).toString('base64url'),
 
   webDistDir: process.env.WEB_DIST_DIR ?? path.resolve(process.cwd(), '..', 'web', 'dist'),
 

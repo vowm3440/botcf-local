@@ -1,14 +1,61 @@
-import { useEffect, useRef, useState } from 'react'
-import { RouteInfo, streamChat, api, StreamEvent } from '../api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { RouteInfo, streamChat, api, StreamEvent, SessionSummary } from '../api'
+
+interface ToolCall {
+  id: string
+  name: string
+  status: 'running' | 'done' | 'error'
+  args?: unknown
+  intent?: string
+  output?: string
+  diff?: string
+}
 
 interface Message {
   role: 'user' | 'assistant'
   content: string
+  tools?: ToolCall[]
 }
 
 interface ChatProps {
   route: RouteInfo | null
   ompRunning: boolean
+}
+
+function ToolCard({ tool }: { tool: ToolCall }) {
+  const status = tool.status === 'running' ? '执行中' : tool.status === 'error' ? '失败' : '完成'
+  return (
+    <details open={tool.status === 'running'} style={{ marginTop: 8, border: `1px solid ${tool.status === 'error' ? '#efb4b4' : '#d9d9d9'}`, borderRadius: 6, background: '#fafafa' }}>
+      <summary style={{ cursor: 'pointer', padding: '8px 10px', fontWeight: 600 }}>
+        {tool.name} <span style={{ color: tool.status === 'error' ? '#c00' : '#777', fontWeight: 400 }}>· {status}</span>
+        {tool.intent && <span style={{ color: '#777', fontWeight: 400 }}> · {tool.intent}</span>}
+      </summary>
+      <div style={{ padding: '0 10px 10px' }}>
+        {tool.args !== undefined && (
+          <>
+            <div style={{ fontSize: 12, color: '#666', marginTop: 6 }}>参数</div>
+            <pre style={{ margin: '4px 0', padding: 8, overflowX: 'auto', background: '#f0f0f0', fontSize: 12 }}>{JSON.stringify(tool.args, null, 2)}</pre>
+          </>
+        )}
+        {tool.output && (
+          <>
+            <div style={{ fontSize: 12, color: '#666', marginTop: 6 }}>输出</div>
+            <pre style={{ margin: '4px 0', padding: 8, maxHeight: 280, overflow: 'auto', background: '#f0f0f0', fontSize: 12, whiteSpace: 'pre-wrap' }}>{tool.output}</pre>
+          </>
+        )}
+        {tool.diff && (
+          <>
+            <div style={{ fontSize: 12, color: '#666', marginTop: 6 }}>文件差异</div>
+            <pre style={{ margin: '4px 0', padding: 8, overflowX: 'auto', background: '#161b22', color: '#ddd', fontSize: 12 }}>
+              {tool.diff.split('\n').map((line, index) => (
+                <span key={index} style={{ display: 'block', color: line.startsWith('+') ? '#7ee787' : line.startsWith('-') ? '#ffa198' : undefined }}>{line || ' '}</span>
+              ))}
+            </pre>
+          </>
+        )}
+      </div>
+    </details>
+  )
 }
 
 export default function Chat({ route, ompRunning }: ChatProps) {
@@ -18,22 +65,30 @@ export default function Chat({ route, ompRunning }: ChatProps) {
   const [sessionTokens, setSessionTokens] = useState({ input: 0, output: 0 })
   const [contextUsage, setContextUsage] = useState<{ tokens: number; contextWindow: number; percent: number } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [currentSessionPath, setCurrentSessionPath] = useState('')
   const abortRef = useRef<AbortController | null>(null)
   const historyLoaded = useRef(false)
 
-  // OMP owns durable history — restore it once after load/restart.
+  const loadHistory = useCallback(async () => {
+    const response = await api.history()
+    if (response.source === 'omp') {
+      setMessages(response.messages)
+      if (response.messages.length > 0) setNotice(`已恢复 ${response.messages.length} 条历史消息`)
+    }
+  }, [])
+
+  const loadSessions = useCallback(async () => {
+    const response = await api.sessions()
+    setSessions(response.sessions)
+    setCurrentSessionPath(response.currentSessionPath ?? '')
+  }, [])
+
   useEffect(() => {
     if (!ompRunning || historyLoaded.current) return
     historyLoaded.current = true
-    api.history()
-      .then((r) => {
-        if (r.source === 'omp' && r.messages.length > 0) {
-          setMessages(r.messages)
-          setNotice(`已恢复 ${r.messages.length} 条历史消息`)
-        }
-      })
-      .catch(() => undefined)
-  }, [ompRunning])
+    Promise.all([loadHistory(), loadSessions()]).catch(() => undefined)
+  }, [loadHistory, loadSessions, ompRunning])
 
   const appendToAssistant = (updater: (prev: string) => string) => {
     setMessages((prev) => {
@@ -48,34 +103,66 @@ export default function Chat({ route, ompRunning }: ChatProps) {
     })
   }
 
+  const updateTool = (ev: StreamEvent) => {
+    if (!ev.id || !ev.name || !ev.phase) return
+    const id = ev.id
+    const name = ev.name
+    const phase = ev.phase
+    setMessages((prev) => {
+      const copy = [...prev]
+      let assistantIndex = copy.length - 1
+      if (assistantIndex < 0 || copy[assistantIndex].role !== 'assistant') {
+        copy.push({ role: 'assistant', content: '', tools: [] })
+        assistantIndex = copy.length - 1
+      }
+      const assistant = copy[assistantIndex]
+      const tools = [...(assistant.tools ?? [])]
+      const existingIndex = tools.findIndex((tool) => tool.id === id)
+      const existing: ToolCall = existingIndex >= 0 ? tools[existingIndex] : { id, name, status: 'running' }
+      const next: ToolCall = {
+        ...existing,
+        name,
+        status: phase === 'end' ? (ev.isError ? 'error' : 'done') : 'running',
+        args: ev.args ?? existing.args,
+        intent: ev.intent ?? existing.intent,
+        output: ev.output ?? existing.output,
+        diff: ev.diff ?? existing.diff
+      }
+      if (existingIndex >= 0) tools[existingIndex] = next
+      else tools.push(next)
+      copy[assistantIndex] = { ...assistant, tools }
+      return copy
+    })
+  }
+
   const onEvent = (ev: StreamEvent) => {
     if (ev.type === 'delta' && ev.text) {
       const text = ev.text
-      appendToAssistant((c) => c + text)
+      appendToAssistant((content) => content + text)
     }
+    if (ev.type === 'tool') updateTool(ev)
     if (ev.type === 'usage') {
       setSessionTokens((prev) => ({ input: prev.input + (ev.inputTokens ?? 0), output: prev.output + (ev.outputTokens ?? 0) }))
     }
     if (ev.type === 'context' && ev.contextWindow) {
       setContextUsage({ tokens: ev.tokens ?? 0, contextWindow: ev.contextWindow, percent: ev.percent ?? 0 })
     }
-    if (ev.type === 'error') appendToAssistant((c) => c + `\n\n[错误] ${ev.message ?? '未知错误'}`)
-    if (ev.type === 'aborted') appendToAssistant((c) => c + '\n\n[已中止]')
+    if (ev.type === 'error') appendToAssistant((content) => content + `\n\n[错误] ${ev.message ?? '未知错误'}`)
+    if (ev.type === 'aborted') appendToAssistant((content) => content + '\n\n[已中止]')
   }
 
   const send = async () => {
     const text = input.trim()
     if (!text || !route) return
 
-    // While streaming in OMP mode, Enter queues a steering message instead.
     if (streaming) {
       if (!ompRunning) return
       setMessages((prev) => [...prev, { role: 'user', content: `(追加) ${text}` }])
       setInput('')
       try {
         await api.steer(text)
-      } catch (e) {
-        setNotice(e instanceof Error ? e.message : '追加失败')
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : '追加失败')
       }
       return
     }
@@ -90,16 +177,17 @@ export default function Chat({ route, ompRunning }: ChatProps) {
     abortRef.current = controller
 
     try {
-      await streamChat(nextMessages, onEvent, controller.signal)
-    } catch (e) {
+      await streamChat(nextMessages.map(({ role, content }) => ({ role, content })), onEvent, controller.signal)
+    } catch (error) {
       if (controller.signal.aborted) {
-        appendToAssistant((c) => c + '\n\n[已中止]')
+        appendToAssistant((content) => content + '\n\n[已中止]')
       } else {
-        appendToAssistant((c) => c + `\n\n[错误] ${e instanceof Error ? e.message : String(e)}`)
+        appendToAssistant((content) => content + `\n\n[错误] ${error instanceof Error ? error.message : String(error)}`)
       }
     } finally {
       setStreaming(false)
       abortRef.current = null
+      loadSessions().catch(() => undefined)
       window.dispatchEvent(new CustomEvent('botcf:turn-complete'))
     }
   }
@@ -116,24 +204,53 @@ export default function Chat({ route, ompRunning }: ChatProps) {
       setSessionTokens({ input: 0, output: 0 })
       setContextUsage(null)
       setNotice('已开始新会话')
-    } catch (e) {
-      setNotice(e instanceof Error ? e.message : '新建会话失败')
+      await loadSessions()
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '新建会话失败')
+    }
+  }
+
+  const switchSession = async (sessionPath: string) => {
+    if (!sessionPath || sessionPath === currentSessionPath) return
+    try {
+      await api.switchSession(sessionPath)
+      setCurrentSessionPath(sessionPath)
+      setSessionTokens({ input: 0, output: 0 })
+      setContextUsage(null)
+      await loadHistory()
+      setNotice('会话已切换')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '切换会话失败')
     }
   }
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', maxWidth: 960, width: '100%', margin: '0 auto', padding: 16, boxSizing: 'border-box', minHeight: 0 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <span style={{ fontSize: 12, color: '#888' }}>{notice ?? ''}</span>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ fontSize: 12, color: '#888', flex: 1 }}>{notice ?? ''}</span>
+        {ompRunning && (
+          <select aria-label="会话" value={currentSessionPath} onChange={(event) => switchSession(event.target.value)} disabled={streaming} style={{ maxWidth: 360, fontSize: 12 }}>
+            {currentSessionPath && !sessions.some((session) => session.path === currentSessionPath) && (
+              <option value={currentSessionPath}>当前新会话</option>
+            )}
+            {!currentSessionPath && <option value="">当前会话</option>}
+            {sessions.map((session) => (
+              <option key={session.path} value={session.path}>
+                {session.title || session.preview || new Date(session.createdAt).toLocaleString()}
+              </option>
+            ))}
+          </select>
+        )}
         <button onClick={newSession} disabled={streaming} style={{ fontSize: 12 }}>新会话</button>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', border: '1px solid #ddd', borderRadius: 8, padding: 16, background: '#fff', minHeight: 0 }}>
         {!route && <p style={{ color: '#888' }}>请先在顶部选择分组和模型。</p>}
-        {messages.map((msg, i) => (
-          <div key={i} style={{ marginBottom: 14 }}>
-            <strong>{msg.role === 'user' ? '你' : '助手'}:</strong>
-            <div style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{msg.content || (streaming && i === messages.length - 1 ? '…' : '')}</div>
+        {messages.map((message, index) => (
+          <div key={index} style={{ marginBottom: 14 }}>
+            <strong>{message.role === 'user' ? '你' : '助手'}:</strong>
+            <div style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{message.content || (streaming && index === messages.length - 1 && !message.tools?.length ? '…' : '')}</div>
+            {message.tools?.map((tool) => <ToolCard key={tool.id} tool={tool} />)}
           </div>
         ))}
       </div>
@@ -141,8 +258,8 @@ export default function Chat({ route, ompRunning }: ChatProps) {
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
         <input
           value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() } }}
           disabled={!route || (streaming && !ompRunning)}
           placeholder={!route ? '未选择路由' : streaming ? (ompRunning ? '生成中——输入内容回车可追加引导…' : '生成中…') : '输入消息…'}
           style={{ flex: 1, padding: 12, borderRadius: 6, border: '1px solid #ccc' }}

@@ -24,19 +24,42 @@ export interface ReleaseInfo {
   sha256?: string
 }
 
+export function validateReleaseVersion(version: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(version) || version === '..') {
+    throw new Error(`无效 OMP 版本标签: ${version}`)
+  }
+  return version
+}
+
+export function normalizeReleaseSha256(value: string | undefined): string {
+  const digest = value?.trim().toLowerCase() ?? ''
+  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('OMP Release 未提供有效 SHA256')
+  return digest
+}
+
+async function sha256File(file: string): Promise<string> {
+  const hash = crypto.createHash('sha256')
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
+export const OFFICIAL_OMP_REPO = 'can1357/oh-my-pi'
+
 /** Pure: normalize a user-pasted repo string — full-width slashes from CJK IMEs,
  *  zero-width characters, full GitHub URLs, and .git suffixes are all accepted. */
 export function normalizeRepoInput(input: string): string {
   // U+200B..U+200D and U+FEFF, built from char codes so no invisible
   // characters live in this source file.
   const zeroWidth = new RegExp('[' + String.fromCharCode(0x200b, 0x200c, 0x200d, 0xfeff) + ']', 'g')
-  return input
+  const repo = input
     .replace(/／/g, '/')
     .replace(/\s+/g, '')
     .replace(zeroWidth, '')
     .replace(/^https?:\/\/(www\.)?github\.com\//i, '')
     .replace(/\.git$/i, '')
     .replace(/\/+$/, '')
+  if (repo !== OFFICIAL_OMP_REPO) throw new Error(`OMP 更新仅允许官方仓库 ${OFFICIAL_OMP_REPO}`)
+  return repo
 }
 
 /** Pure: swapping to a new version must remember the OLD current as previous —
@@ -109,11 +132,12 @@ export class OmpUpdater {
 
   /** UI-configured repo wins; falls back to the OMP_GITHUB_REPO env. */
   effectiveRepo(): string | null {
-    return this.state.repo ?? (config.ompUpdate.githubRepo || null)
+    const configured = this.state.repo ?? (config.ompUpdate.githubRepo || null)
+    return configured ? normalizeRepoInput(configured) : null
   }
 
   async setRepo(repo: string | null): Promise<void> {
-    this.state = { ...this.state, repo }
+    this.state = { ...this.state, repo: repo ? normalizeRepoInput(repo) : null }
     await this.persist()
     this.stopLoop()
     if (this.effectiveRepo()) this.startLoop()
@@ -186,11 +210,19 @@ export class OmpUpdater {
       this.hooks.log(`发现 ${release.version},等待会话空闲后切换`)
       return
     }
-    await this.installAndSwap(release)
+    try {
+      await this.installAndSwap(release)
+    } catch (error) {
+      this.state.lastError = error instanceof Error ? error.message : String(error)
+      await this.persist()
+      throw error
+    }
   }
 
-  private async installAndSwap(release: ReleaseInfo): Promise<void> {
-    const targetDir = path.join(versionsDir(), release.version)
+  async installAndSwap(release: ReleaseInfo): Promise<void> {
+    const version = validateReleaseVersion(release.version)
+    const expectedHash = normalizeReleaseSha256(release.sha256)
+    const targetDir = path.join(versionsDir(), version)
     const binName = process.platform === 'win32' ? 'omp.exe' : 'omp'
     const binPath = path.join(targetDir, binName)
 
@@ -211,25 +243,39 @@ export class OmpUpdater {
         fs.createWriteStream(tmp)
       )
       const digest = hash.digest('hex')
-      if (release.sha256 && digest !== release.sha256.toLowerCase()) {
+      if (digest !== expectedHash) {
         await fsp.rm(tmp, { force: true })
-        throw new Error(`SHA256 校验失败: 期望 ${release.sha256}, 实际 ${digest}`)
+        throw new Error(`SHA256 校验失败: 期望 ${expectedHash}, 实际 ${digest}`)
       }
       await fsp.rename(tmp, binPath)
       if (process.platform !== 'win32') await fsp.chmod(binPath, 0o755)
+    } else {
+      const digest = await sha256File(binPath)
+      if (digest !== expectedHash) throw new Error(`已有 OMP 二进制 SHA256 校验失败: 期望 ${expectedHash}, 实际 ${digest}`)
     }
 
-    await this.swapTo(release.version)
+    await this.swapTo(version)
 
-    const healthy = await this.hooks.healthProbe()
+    let healthy = false
+    try {
+      healthy = await this.hooks.healthProbe()
+    } catch (error) {
+      this.state.lastError = `安装后冒烟失败: ${error instanceof Error ? error.message : String(error)}`
+    }
     if (!healthy) {
+      this.state.lastError ??= '安装后冒烟失败'
       this.consecutiveFailures++
       if (shouldRollback(this.consecutiveFailures, 1)) {
-        await this.rollback()
+        const rolledBack = await this.rollback()
+        const restored = rolledBack && await this.hooks.healthProbe().catch(() => false)
+        if (!restored) this.state.lastError = `${this.state.lastError ?? '安装后冒烟失败'}; 旧版本恢复验证失败`
+        await this.persist()
         return
       }
     }
     this.consecutiveFailures = 0
+    this.state.lastError = null
+    await this.persist()
     this.hooks.log(`OMP 已切换到 ${release.version}`)
   }
 

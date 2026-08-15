@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { config } from '../config.js'
+import { getDb } from '../db.js'
 
 /** oh-my-pi RPC wire contract (docs/rpc.md, verified against v17.3.x):
  *  - stdin:  {id?: string, type: "<command>", ...params} one JSON per line
@@ -37,6 +38,92 @@ export function ompBinaryPath(): string {
   return path.join(config.ompDir, 'current', name)
 }
 
+export interface BotcfModelConfigRow {
+  model_id: string
+  api_type: 'responses' | 'chat' | 'messages'
+  effective_context: number
+  max_output: number
+}
+
+interface CustomModel {
+  id: string
+  name: string
+  api: string
+  reasoning: boolean
+  supportsTools: boolean
+  input: string[]
+  contextWindow: number
+  maxTokens: number
+}
+
+interface CustomProvider {
+  baseUrl: string
+  apiKey: string
+  api: string
+  models: CustomModel[]
+}
+
+export interface BotcfModelsConfig {
+  providers: Record<string, CustomProvider>
+}
+
+/** Build an app-owned OMP provider catalog. The proxy owns credentials and wire
+ *  routing; OMP receives only the loopback URL and effective context limits. */
+export function buildBotcfModelsConfig(rows: BotcfModelConfigRow[], proxyBase: string, proxyToken: string): BotcfModelsConfig {
+  const definitions = {
+    responses: { provider: 'botcf-responses', api: 'openai-responses', baseUrl: `${proxyBase}/v1` },
+    chat: { provider: 'botcf-chat', api: 'openai-completions', baseUrl: `${proxyBase}/v1` },
+    messages: { provider: 'botcf-messages', api: 'anthropic-messages', baseUrl: proxyBase }
+  } as const
+  const modelMaps = new Map<string, Map<string, CustomModel>>()
+  for (const definition of Object.values(definitions)) modelMaps.set(definition.provider, new Map())
+  for (const row of rows) {
+    const definition = definitions[row.api_type]
+    const models = modelMaps.get(definition.provider)!
+    const existing = models.get(row.model_id)
+    models.set(row.model_id, {
+      id: row.model_id,
+      name: row.model_id,
+      api: definition.api,
+      reasoning: true,
+      supportsTools: true,
+      input: ['text'],
+      contextWindow: Math.max(row.effective_context, existing?.contextWindow ?? 0),
+      maxTokens: Math.max(row.max_output, existing?.maxTokens ?? 0)
+    })
+  }
+  const providers: Record<string, CustomProvider> = {}
+  for (const definition of Object.values(definitions)) {
+    providers[definition.provider] = {
+      baseUrl: definition.baseUrl,
+      apiKey: proxyToken,
+      api: definition.api,
+      models: [...modelMaps.get(definition.provider)!.values()]
+    }
+  }
+  return { providers }
+}
+
+export function ompAgentDir(): string {
+  return path.join(config.ompDir, 'agent')
+}
+
+/** Persist the generated catalog before OMP starts. Returns true when a running
+ *  process must be restarted to observe a changed model list or context limit. */
+export function syncBotcfModelsConfig(): boolean {
+  const rows = getDb()
+    .prepare('SELECT model_id, api_type, effective_context, max_output FROM model_capabilities')
+    .all() as unknown as BotcfModelConfigRow[]
+  const content = JSON.stringify(buildBotcfModelsConfig(rows, `http://127.0.0.1:${config.proxyPort}`, config.proxyToken), null, 2) + '\n'
+  const agentDir = ompAgentDir()
+  const file = path.join(agentDir, 'models.yml')
+  fs.mkdirSync(agentDir, { recursive: true })
+  const previous = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
+  if (previous === content) return false
+  fs.writeFileSync(file, content, { encoding: 'utf8', mode: 0o600 })
+  return true
+}
+
 export class OmpRpcClient extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null
   private nextId = 1
@@ -60,17 +147,20 @@ export class OmpRpcClient extends EventEmitter {
   async start(): Promise<boolean> {
     if (this.child && this.child.exitCode === null) return true
     if (!this.available) return false
+    syncBotcfModelsConfig()
 
     this.isReady = false
     const proxyBase = `http://127.0.0.1:${config.proxyPort}`
     const child = spawn(ompBinaryPath(), ['--mode', 'rpc'], {
       env: {
         ...process.env,
+        PI_CODING_AGENT_DIR: ompAgentDir(),
+        OMP_SKIP_SETUP: '1',
         // OMP only ever sees the local credential proxy, never real keys.
         OPENAI_BASE_URL: `${proxyBase}/v1`,
-        OPENAI_API_KEY: 'proxy-managed',
+        OPENAI_API_KEY: config.proxyToken,
         ANTHROPIC_BASE_URL: proxyBase,
-        ANTHROPIC_API_KEY: 'proxy-managed'
+        ANTHROPIC_API_KEY: config.proxyToken
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.workdir && fs.existsSync(this.workdir) ? this.workdir : undefined
@@ -209,6 +299,39 @@ export class OmpRpcClient extends EventEmitter {
   /** Ack is immediate; completion arrives via agent_end events (isTerminal !== false). */
   promptMessage(message: string): Promise<{ agentInvoked?: boolean } | undefined> {
     return this.call('prompt', { message })
+  }
+
+  /** Installed-version smoke: model selection plus one real prompt. The caller
+   *  must restart this client first so the probe exercises the newly linked binary. */
+  async smokeTest(provider: string, modelId: string, timeoutMs = 90_000): Promise<boolean> {
+    const marker = 'BOTCF_OMP_SMOKE_OK'
+    await this.setModel(provider, modelId)
+    let stopWaiting = () => {}
+    const terminal = new Promise<void>((resolve, reject) => {
+      const onEvent = (event: Record<string, unknown>) => {
+        if (event.type !== 'agent_end' || event.isTerminal === false) return
+        stopWaiting()
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        stopWaiting()
+        reject(new Error('OMP 冒烟 prompt 超时'))
+      }, timeoutMs)
+      stopWaiting = () => {
+        clearTimeout(timer)
+        this.off('event', onEvent)
+      }
+      this.on('event', onEvent)
+    })
+    try {
+      const result = await this.promptMessage(`Reply exactly ${marker}. Do not call tools.`)
+      if (result?.agentInvoked === false) return false
+      await terminal
+      const response = await this.call<{ text: string | null }>('get_last_assistant_text')
+      return response.text?.includes(marker) === true
+    } finally {
+      stopWaiting()
+    }
   }
 
   abortGeneration(): Promise<unknown> {

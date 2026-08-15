@@ -5,7 +5,8 @@ import { config } from './config.js'
 import { getDb } from './db.js'
 import { initSecrets } from './secure/store.js'
 import { redact } from './secure/redact.js'
-import { appState, restoreBotcfSession, rearmRoute } from './appState.js'
+import { isTrustedLocalRequest } from './secure/localRequest.js'
+import { appState, applyActiveRouteToOmp, restoreBotcfSession, rearmRoute } from './appState.js'
 import { startCredentialProxy } from './proxy/credentialProxy.js'
 import { registerApiRoutes } from './routes/api.js'
 import { registerChatRoutes } from './routes/chat.js'
@@ -26,6 +27,11 @@ async function main(): Promise<void> {
     },
     bodyLimit: 32 * 1024 * 1024
   })
+  app.addHook('onRequest', async (req, reply) => {
+    if (!isTrustedLocalRequest(req.headers.host, req.headers.origin)) {
+      return reply.code(403).send({ success: false, error: '仅允许同源回环访问' })
+    }
+  })
 
   app.get('/health', async () => ({ status: 'ok' }))
 
@@ -35,10 +41,14 @@ async function main(): Promise<void> {
   const updater = new OmpUpdater({
     isIdle: () => !appState.generationInFlight,
     healthProbe: async () => {
+      await ompClient.stop()
       if (!ompClient.available) return false
       const started = await ompClient.start()
-      if (!started) return false
-      return ompClient.handshake()
+      if (!started || !(await ompClient.handshake())) return false
+      const route = appState.route
+      if (!route || !(await applyActiveRouteToOmp())) return false
+      const provider = route.apiType === 'messages' ? 'botcf-messages' : route.apiType === 'chat' ? 'botcf-chat' : 'botcf-responses'
+      return ompClient.smokeTest(provider, route.modelId)
     },
     log: (msg) => app.log.info(msg)
   })

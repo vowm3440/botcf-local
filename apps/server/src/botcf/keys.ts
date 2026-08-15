@@ -1,5 +1,7 @@
 import { BotcfClient, BotcfError, BotcfTokenItem } from './adapter.js'
 import { config } from '../config.js'
+import { deleteSecret, getSecret, putSecret } from '../db.js'
+import { open, seal } from '../secure/store.js'
 
 /** Strip emoji/decorations from a BotCF group name: "⚓codex-plus" -> "codex-plus". */
 export function normalizeGroupName(group: string): string {
@@ -38,21 +40,51 @@ export async function discoverGroups(client: BotcfClient): Promise<string[]> {
   return [...groups]
 }
 
+
+function isUsableBearerKey(value: string): boolean {
+  return /^sk-[A-Za-z0-9_-]{16,}$/.test(value)
+}
 /** Find-or-create the dedicated key for a group. Never touches user-created
  *  shared keys: we only ever match on our own omp-local-* naming scheme. */
 export async function ensureDedicatedKey(client: BotcfClient, group: string): Promise<{ name: string; key: string; token: BotcfTokenItem }> {
   const name = dedicatedKeyName(group)
-
+  const secretName = `botcf.dedicated-key.${name}`
   const findByName = (tokens: BotcfTokenItem[]): BotcfTokenItem | undefined =>
-    tokens.find((t) => t.name === name && t.status === 1)
+    tokens.find((item) => item.name === name && item.status === 1)
 
-  let token = findByName(await client.listTokens())
-  if (!token) {
-    await client.createToken({ name, group, unlimitedQuota: true })
-    token = findByName(await client.listTokens())
-    if (!token) {
-      throw new BotcfError(`创建分组专用 Key 后未能在列表中找到它: ${name}`)
+  let cachedKey: string | null = null
+  const encrypted = getSecret(secretName)
+  if (encrypted) {
+    try {
+      const opened = open(encrypted)
+      if (isUsableBearerKey(opened)) cachedKey = opened
+      else deleteSecret(secretName)
+    } catch {
+      deleteSecret(secretName)
     }
   }
-  return { name, key: toBearerKey(token.key), token }
+
+  let token = findByName(await client.listTokens())
+  if (token && cachedKey) return { name, key: cachedKey, token }
+
+  // Older builds did not persist generated keys. Rotate only our namespaced key
+  // once, because New API installations may mask it on subsequent list calls.
+  if (token) {
+    await client.deleteToken(token.id)
+    token = undefined
+  }
+  const created = await client.createToken({ name, group, unlimitedQuota: true })
+  token = created ?? findByName(await client.listTokens())
+  if (!token) {
+    throw new BotcfError(`创建分组专用 Key 后未能在列表中找到它: ${name}`)
+  }
+  if (!isUsableBearerKey(toBearerKey(token.key))) {
+    token = { ...token, key: await client.revealTokenKey(token.id) }
+  }
+  const key = toBearerKey(token.key)
+  if (!isUsableBearerKey(key)) {
+    throw new BotcfError(`BotCF 未返回可用的完整 Key: ${name}`)
+  }
+  putSecret(secretName, seal(key))
+  return { name, key, token }
 }

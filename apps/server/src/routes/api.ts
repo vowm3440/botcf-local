@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { appState, persistBotcfSession, clearBotcfSession, persistRoute } from '../appState.js'
+import { appState, applyActiveRouteToOmp, persistBotcfSession, clearBotcfSession, persistRoute } from '../appState.js'
 import { BotcfError } from '../botcf/adapter.js'
 import { discoverGroups, ensureDedicatedKey } from '../botcf/keys.js'
 import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup } from '../catalog/routing.js'
@@ -165,16 +165,7 @@ export function registerApiRoutes(app: FastifyInstance): void {
     let ompApplied = false
     if (ompClient.running) {
       try {
-        // OMP resolves models as provider/modelId; both providers point at the
-        // local credential proxy via env, so the proxy decides the real wire.
-        const ompProvider = policy.apiType === 'messages' ? 'anthropic' : 'openai'
-        await ompClient.setModel(ompProvider, model)
-        if (level) await ompClient.setThinkingLevel(level)
-        const state = await ompClient.getState()
-        if (state.model && state.model.id !== model) {
-          throw new Error(`OMP 状态校验失败: 期望 ${model}, 实际 ${String(state.model.id)}`)
-        }
-        ompApplied = true
+        ompApplied = await applyActiveRouteToOmp()
       } catch (err: unknown) {
         // OMP misbehaving must not break routing — the credential proxy is
         // already armed, so chat falls back to direct mode.

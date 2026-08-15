@@ -1,6 +1,8 @@
 import { FastifyInstance, FastifyReply } from 'fastify'
+import fs from 'node:fs'
+import path from 'node:path'
 import { request as undiciRequest } from 'undici'
-import { appState } from '../appState.js'
+import { appState, applyActiveRouteToOmp } from '../appState.js'
 import { config } from '../config.js'
 import { getCapability, markVerified } from '../catalog/capability.js'
 import { ompClient } from '../omp/rpc.js'
@@ -84,7 +86,7 @@ async function streamDirect(reply: FastifyReply, messages: ChatMessage[]): Promi
 
   const upstream = await undiciRequest(`http://127.0.0.1:${config.proxyPort}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${config.proxyToken}` },
     body: JSON.stringify(body),
     signal: abort.signal
   })
@@ -143,13 +145,137 @@ export function extractSessionUsage(stats: Record<string, unknown>): { input: nu
     if (nested && typeof nested === 'object') candidates.push(nested as Record<string, unknown>)
   }
   for (const obj of candidates) {
-    const input = pick(obj, ['input_tokens', 'inputTokens', 'prompt_tokens', 'promptTokens', 'totalInputTokens'])
-    const output = pick(obj, ['output_tokens', 'outputTokens', 'completion_tokens', 'completionTokens', 'totalOutputTokens'])
+    const input = pick(obj, ['input', 'input_tokens', 'inputTokens', 'prompt_tokens', 'promptTokens', 'totalInputTokens'])
+    const output = pick(obj, ['output', 'output_tokens', 'outputTokens', 'completion_tokens', 'completionTokens', 'totalOutputTokens'])
     if (input !== undefined || output !== undefined) {
       return { input: input ?? 0, output: output ?? 0 }
     }
   }
   return null
+}
+
+export interface ToolStreamEvent {
+  type: 'tool'
+  phase: 'start' | 'update' | 'end'
+  id: string
+  name: string
+  args?: unknown
+  intent?: string
+  output?: string
+  diff?: string
+  isError?: boolean
+}
+
+ 
+
+function toolResultText(result: unknown): string | undefined {
+  if (typeof result === 'string') return result
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return undefined
+  if ('text' in result && typeof result.text === 'string') return result.text
+  if (!('content' in result) || !Array.isArray(result.content)) return undefined
+  const text = result.content
+    .map((part) => {
+      if (typeof part === 'string') return part
+      return part && typeof part === 'object' && 'text' in part && typeof part.text === 'string' ? part.text : ''
+    })
+    .filter(Boolean)
+    .join('\n')
+  return text || undefined
+}
+
+/** Preserve OMP tool lifecycle data as structured SSE instead of flattening it
+ *  into assistant prose. */
+export function normalizeToolEvent(msg: Record<string, unknown>): ToolStreamEvent | null {
+  const rawPhase = String(msg.type ?? '').replace('tool_execution_', '')
+  if (rawPhase !== 'start' && rawPhase !== 'update' && rawPhase !== 'end') return null
+  const id = typeof msg.toolCallId === 'string' ? msg.toolCallId : ''
+  const name = typeof msg.toolName === 'string' ? msg.toolName : '工具'
+  if (!id) return null
+  const event: ToolStreamEvent = { type: 'tool', phase: rawPhase, id, name }
+  if (rawPhase === 'start') {
+    event.args = msg.args
+    if (typeof msg.intent === 'string') event.intent = msg.intent
+  } else {
+    const result = rawPhase === 'update' ? msg.partialResult : msg.result
+    const output = toolResultText(result)
+    if (output) event.output = output
+    if (result && typeof result === 'object' && 'details' in result) {
+      const details = result.details
+      if (details && typeof details === 'object' && 'diff' in details && typeof details.diff === 'string') {
+        event.diff = details.diff
+      }
+    }
+    if (rawPhase === 'end') event.isError = msg.isError === true
+  }
+  return event
+}
+
+export interface SessionSummary {
+  path: string
+  id: string
+  title: string
+  preview: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** Parse only a bounded transcript prefix; title/session metadata and the first
+ *  user prompt are written at the start of every OMP JSONL session. */
+export function parseSessionSummary(sessionPath: string, prefix: string, updatedAt: number): SessionSummary | null {
+  let id = path.basename(sessionPath, '.jsonl')
+  let title = ''
+  let preview = ''
+  let createdAt = updatedAt
+  for (const line of prefix.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    try {
+      const entry: unknown = JSON.parse(line)
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !('type' in entry)) continue
+      if (entry.type === 'title' && 'title' in entry && typeof entry.title === 'string') title = entry.title.trim()
+      if (entry.type === 'session') {
+        if ('id' in entry && typeof entry.id === 'string') id = entry.id
+        if ('timestamp' in entry && typeof entry.timestamp === 'string') {
+          const parsed = Date.parse(entry.timestamp)
+          if (Number.isFinite(parsed)) createdAt = parsed
+        }
+      }
+      if (!preview && entry.type === 'message' && 'message' in entry) {
+        const message = entry.message
+        if (message && typeof message === 'object' && 'role' in message && message.role === 'user') {
+          const normalized = normalizeAgentMessage(message)
+          preview = normalized[0]?.content.trim().replace(/\s+/g, ' ').slice(0, 160) ?? ''
+        }
+      }
+    } catch {
+      // A bounded prefix may end mid-line; earlier complete metadata remains valid.
+    }
+  }
+  return { path: sessionPath, id, title, preview, createdAt, updatedAt }
+}
+
+function readPrefix(file: string, maxBytes = 128 * 1024): string {
+  const fd = fs.openSync(file, 'r')
+  try {
+    const buffer = Buffer.allocUnsafe(maxBytes)
+    const bytes = fs.readSync(fd, buffer, 0, maxBytes, 0)
+    return buffer.subarray(0, bytes).toString('utf8')
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+function listSessionSummaries(currentSessionPath: string): SessionSummary[] {
+  const directory = path.dirname(currentSessionPath)
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
+    .map((entry) => {
+      const file = path.join(directory, entry.name)
+      const stat = fs.statSync(file)
+      return parseSessionSummary(file, readPrefix(file), stat.mtimeMs)
+    })
+    .filter((entry): entry is SessionSummary => entry !== null)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 50)
 }
 
 /** OMP structured mode: send the newest user message, then translate OMP's
@@ -173,9 +299,9 @@ async function streamViaOmp(reply: FastifyReply, messages: ChatMessage[]): Promi
       if (ev?.type === 'text_delta' && ev.delta) sseWrite(reply, { type: 'delta', text: ev.delta })
       return
     }
-    if (t === 'tool_execution_start') {
-      const name = (msg as { toolName?: string }).toolName ?? (msg as { name?: string }).name ?? '工具'
-      sseWrite(reply, { type: 'delta', text: `\n⏺ 工具调用: ${name}\n` })
+    if (t === 'tool_execution_start' || t === 'tool_execution_update' || t === 'tool_execution_end') {
+      const event = normalizeToolEvent(msg)
+      if (event) sseWrite(reply, event)
       return
     }
     if (t === 'agent_end' && (msg as { isTerminal?: boolean }).isTerminal !== false) {
@@ -305,6 +431,33 @@ export function registerChatRoutes(app: FastifyInstance): void {
       return reply.code(409).send({ success: false, error: redact(err instanceof Error ? err.message : String(err)) })
     }
     return { success: true, source: 'omp', messages: collected }
+  })
+
+  app.get('/api/chat/sessions', async () => {
+    if (!ompClient.running) return { success: true, currentSessionPath: null, sessions: [] }
+    const state = await ompClient.getState()
+    const currentSessionPath = typeof state.sessionFile === 'string' ? state.sessionFile : null
+    if (!currentSessionPath || !fs.existsSync(path.dirname(currentSessionPath))) {
+      return { success: true, currentSessionPath, sessions: [] }
+    }
+    return { success: true, currentSessionPath, sessions: listSessionSummaries(currentSessionPath) }
+  })
+
+  app.post<{ Body: { sessionPath: string } }>('/api/chat/switch', async (req, reply) => {
+    if (appState.generationInFlight) {
+      return reply.code(409).send({ success: false, error: '生成进行中,先中止再切换会话' })
+    }
+    if (!ompClient.running) return reply.code(409).send({ success: false, error: 'OMP 未运行' })
+    const state = await ompClient.getState()
+    const current = typeof state.sessionFile === 'string' ? path.resolve(state.sessionFile) : null
+    const requested = path.resolve(req.body?.sessionPath ?? '')
+    if (!current || path.dirname(requested) !== path.dirname(current) || path.extname(requested) !== '.jsonl' || !fs.existsSync(requested)) {
+      return reply.code(400).send({ success: false, error: '会话文件不属于当前项目' })
+    }
+    await ompClient.call('switch_session', { sessionPath: requested })
+    await applyActiveRouteToOmp()
+    appState.lastOmpUsage = { input: 0, output: 0 }
+    return { success: true }
   })
 
   app.post('/api/chat/new', async (req, reply) => {

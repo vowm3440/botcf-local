@@ -1,5 +1,6 @@
 import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { request as undiciRequest } from 'undici'
+import crypto from 'node:crypto'
 import { config } from '../config.js'
 import { redact } from '../secure/redact.js'
 import { recordContextError } from '../catalog/capability.js'
@@ -46,7 +47,26 @@ function isContextError(status: number, body: string): boolean {
   return status === 400 && /context length|context window|maximum context|too many tokens/i.test(body)
 }
 
+
+export function isProxyRequestAuthorized(authorization: string | undefined, apiKey: string | undefined, expected: string): boolean {
+  const supplied = authorization?.replace(/^Bearer\s+/i, '') ?? apiKey ?? ''
+  const left = Buffer.from(supplied)
+  const right = Buffer.from(expected)
+  return left.length === right.length && crypto.timingSafeEqual(left, right)
+}
+
+export function requestedModel(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined
+  const model = Reflect.get(body, 'model')
+  return typeof model === 'string' ? model : undefined
+}
 async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  const authorization = typeof req.headers.authorization === 'string' ? req.headers.authorization : undefined
+  const apiKey = typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'] : undefined
+  if (!isProxyRequestAuthorized(authorization, apiKey, config.proxyToken)) {
+    reply.code(401).send({ error: { message: '本地凭据代理认证失败' } })
+    return
+  }
   const route = activeRoute
   if (!route) {
     reply.code(503).send({ error: { message: '尚未选择分组/模型:请先在控制台完成路由配置' } })
@@ -55,6 +75,11 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
   const apiType = PATH_TO_API[req.url.split('?')[0]]
   if (apiType && apiType !== route.apiType) {
     reply.code(409).send({ error: { message: `当前路由是 ${route.apiType} 接口,收到的却是 ${apiType} 请求` } })
+    return
+  }
+  const model = requestedModel(req.body)
+  if (model !== route.modelId) {
+    reply.code(409).send({ error: { message: `请求模型必须与当前路由一致: ${route.modelId}` } })
     return
   }
 
@@ -68,9 +93,7 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
   }
 
   const abort = new AbortController()
-  req.raw.on('close', () => {
-    if (req.raw.destroyed) abort.abort()
-  })
+  req.raw.on('aborted', () => abort.abort())
 
   try {
     const upstream = await undiciRequest(upstreamUrl(req.url), {

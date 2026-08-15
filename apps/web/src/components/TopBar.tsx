@@ -22,6 +22,7 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
   const [ompVersion, setOmpVersion] = useState<string | null>(null)
   const [ompRepo, setOmpRepo] = useState<string | null>(null)
   const [ompUpstream, setOmpUpstream] = useState<string | null>(null)
+  const [ompChannel, setOmpChannel] = useState<'fast' | 'stable' | 'experimental'>('fast')
   const [ompProtoError, setOmpProtoError] = useState<string | null>(null)
   const [repoEditing, setRepoEditing] = useState(false)
   const [repoInput, setRepoInput] = useState('')
@@ -34,6 +35,7 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
       setOmpVersion(r.update.currentVersion)
       setOmpRepo(r.update.repo)
       setOmpUpstream(r.update.latestUpstream)
+      setOmpChannel(r.update.channel)
       setOmpProtoError(r.protocolError)
       setWorkdir(r.workdir)
     }).catch(() => setOmpVersion(null))
@@ -193,6 +195,24 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
             <button style={{ marginLeft: 6 }} onClick={() => { setRepoInput(ompRepo ?? ''); setRepoEditing(true) }}>配置仓库</button>
           )}
         </span>
+        <select
+          aria-label="OMP 更新通道"
+          value={ompChannel}
+          onChange={async (event) => {
+            const channel = event.target.value
+            if (channel !== 'fast' && channel !== 'stable' && channel !== 'experimental') return
+            try {
+              await api.setOmpChannel(channel)
+              setOmpChannel(channel)
+            } catch (e) {
+              setError(e instanceof Error ? e.message : '通道切换失败')
+            }
+          }}
+        >
+          <option value="fast">快速通道</option>
+          <option value="stable">稳定通道</option>
+          <option value="experimental">实验通道</option>
+        </select>
         {repoEditing && (
           <span>
             <input

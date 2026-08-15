@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planSwap, releaseEligible, shouldRollback, normalizeRepoInput, UpdateState } from '../src/omp/updater.js'
+import { planSwap, releaseEligible, shouldRollback, normalizeRepoInput, normalizeReleaseSha256, validateReleaseVersion, UpdateState } from '../src/omp/updater.js'
 
 const base: UpdateState = {
   currentVersion: 'v17.2.1',
@@ -29,6 +29,10 @@ describe('normalizeRepoInput', () => {
     expect(normalizeRepoInput('https://github.com/can1357/oh-my-pi')).toBe('can1357/oh-my-pi')
     expect(normalizeRepoInput('https://github.com/can1357/oh-my-pi.git')).toBe('can1357/oh-my-pi')
     expect(normalizeRepoInput('can1357/oh-my-pi/')).toBe('can1357/oh-my-pi')
+  })
+
+  it('rejects non-official updater repositories', () => {
+    expect(() => normalizeRepoInput('attacker/omp')).toThrow(/官方仓库/)
   })
 })
 
@@ -72,5 +76,17 @@ describe('shouldRollback', () => {
     expect(shouldRollback(0)).toBe(false)
     expect(shouldRollback(2)).toBe(false)
     expect(shouldRollback(3)).toBe(true)
+  })
+})
+
+describe('release artifact validation', () => {
+  it('rejects traversal in release tags', () => {
+    expect(() => validateReleaseVersion('../../escape')).toThrow(/版本标签/)
+    expect(validateReleaseVersion('v17.3.4')).toBe('v17.3.4')
+  })
+
+  it('requires a complete SHA256 digest', () => {
+    expect(() => normalizeReleaseSha256(undefined)).toThrow(/SHA256/)
+    expect(normalizeReleaseSha256('A'.repeat(64))).toBe('a'.repeat(64))
   })
 })

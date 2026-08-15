@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildUpstreamRequest, extractDelta, normalizeAgentMessage, extractSessionUsage } from '../src/routes/chat.js'
+import { buildUpstreamRequest, extractDelta, normalizeAgentMessage, extractSessionUsage, normalizeToolEvent, parseSessionSummary } from '../src/routes/chat.js'
 import { parseContextLimit } from '../src/proxy/credentialProxy.js'
 
 describe('extractSessionUsage', () => {
@@ -11,8 +11,69 @@ describe('extractSessionUsage', () => {
     expect(extractSessionUsage({ usage: { inputTokens: 7, outputTokens: 3 } })).toEqual({ input: 7, output: 3 })
   })
 
+  it('reads OMP SessionStats token totals', () => {
+    expect(extractSessionUsage({ tokens: { input: 420, output: 84, total: 504 } })).toEqual({ input: 420, output: 84 })
+  })
+
   it('returns null when nothing token-like exists', () => {
     expect(extractSessionUsage({ messageCount: 4 })).toBeNull()
+  })
+})
+
+describe('normalizeToolEvent', () => {
+  it('keeps structured call arguments and intent', () => {
+    expect(normalizeToolEvent({
+      type: 'tool_execution_start',
+      toolCallId: 'call-1',
+      toolName: 'edit',
+      args: { path: 'src/app.ts' },
+      intent: 'Updating app'
+    })).toEqual({
+      type: 'tool',
+      phase: 'start',
+      id: 'call-1',
+      name: 'edit',
+      args: { path: 'src/app.ts' },
+      intent: 'Updating app'
+    })
+  })
+
+  it('extracts output and diff details from a completed call', () => {
+    expect(normalizeToolEvent({
+      type: 'tool_execution_end',
+      toolCallId: 'call-1',
+      toolName: 'edit',
+      result: {
+        content: [{ type: 'text', text: 'Applied patch' }],
+        details: { diff: '-old\\n+new' }
+      }
+    })).toEqual({
+      type: 'tool',
+      phase: 'end',
+      id: 'call-1',
+      name: 'edit',
+      output: 'Applied patch',
+      diff: '-old\\n+new',
+      isError: false
+    })
+  })
+})
+
+describe('parseSessionSummary', () => {
+  it('uses the saved title and first user prompt', () => {
+    const text = [
+      JSON.stringify({ type: 'title', title: 'Repair parser' }),
+      JSON.stringify({ type: 'session', id: 'session-1', timestamp: '2026-08-15T00:00:00.000Z' }),
+      JSON.stringify({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'Fix the parser edge case' }] } })
+    ].join('\n')
+    expect(parseSessionSummary('C:/sessions/a.jsonl', text, 1234)).toEqual({
+      path: 'C:/sessions/a.jsonl',
+      id: 'session-1',
+      title: 'Repair parser',
+      preview: 'Fix the parser edge case',
+      createdAt: Date.parse('2026-08-15T00:00:00.000Z'),
+      updatedAt: 1234
+    })
   })
 })
 

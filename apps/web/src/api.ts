@@ -45,6 +45,15 @@ export interface AppStateInfo {
   generationInFlight: boolean
 }
 
+export interface SessionSummary {
+  path: string
+  id: string
+  title: string
+  preview: string
+  createdAt: number
+  updatedAt: number
+}
+
 async function json<T>(res: Response): Promise<T> {
   const body = (await res.json()) as T & { success?: boolean; error?: string }
   if (!res.ok || body.success === false) {
@@ -99,7 +108,7 @@ export const api = {
         running: boolean
         protocolError: string | null
         workdir: string | null
-        update: { currentVersion: string | null; latestUpstream: string | null; channel: string; repo: string | null; lastError: string | null }
+        update: { currentVersion: string | null; latestUpstream: string | null; channel: 'fast' | 'stable' | 'experimental'; repo: string | null; lastError: string | null }
       }>(r)
     ),
 
@@ -109,6 +118,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repo })
     }).then((r) => json<{ success: boolean; update: { currentVersion: string | null; latestUpstream: string | null; lastError: string | null } }>(r)),
+
+  setOmpChannel: (channel: 'fast' | 'stable' | 'experimental') =>
+    fetch('/api/omp/channel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel })
+    }).then((r) => json<{ success: boolean }>(r)),
 
   ompRestart: () =>
     fetch('/api/omp/restart', { method: 'POST' }).then((r) =>
@@ -136,6 +152,18 @@ export const api = {
 
   newSession: () => fetch('/api/chat/new', { method: 'POST' }).then((r) => json<{ success: boolean }>(r)),
 
+  sessions: () =>
+    fetch('/api/chat/sessions').then((r) =>
+      json<{ success: boolean; currentSessionPath: string | null; sessions: SessionSummary[] }>(r)
+    ),
+
+  switchSession: (sessionPath: string) =>
+    fetch('/api/chat/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionPath })
+    }).then((r) => json<{ success: boolean }>(r)),
+
   steer: (message: string) =>
     fetch('/api/chat/steer', {
       method: 'POST',
@@ -156,7 +184,7 @@ export interface OmpUiRequest {
 }
 
 export interface StreamEvent {
-  type: 'delta' | 'usage' | 'done' | 'error' | 'aborted' | 'context'
+  type: 'delta' | 'usage' | 'done' | 'error' | 'aborted' | 'context' | 'tool'
   text?: string
   inputTokens?: number
   outputTokens?: number
@@ -164,6 +192,14 @@ export interface StreamEvent {
   contextWindow?: number
   percent?: number
   message?: string
+  phase?: 'start' | 'update' | 'end'
+  id?: string
+  name?: string
+  args?: unknown
+  intent?: string
+  output?: string
+  diff?: string
+  isError?: boolean
 }
 
 /** POST /api/chat/stream and iterate normalized SSE events via fetch streaming. */

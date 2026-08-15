@@ -164,8 +164,8 @@ export class BotcfClient {
   /** POST /api/token/ — create a key bound to a group. Empty group string means
    *  "user default group", so callers must pass the real group name (verified:
    *  creating with group "" yields an unbound key). */
-  async createToken(opts: CreateTokenOptions): Promise<void> {
-    await this.request<unknown>('POST', '/api/token/', {
+  async createToken(opts: CreateTokenOptions): Promise<BotcfTokenItem | null> {
+    return (await this.request<BotcfTokenItem | null>('POST', '/api/token/', {
       name: opts.name,
       group: opts.group,
       remain_quota: opts.remainQuota ?? 500_000,
@@ -174,7 +174,26 @@ export class BotcfClient {
       model_limits_enabled: false,
       model_limits: '',
       cross_group_retry: false
-    })
+    })) ?? null
+  }
+
+
+  /** BotCF one-time key reveal endpoint used by its own console integrations. */
+  async revealTokenKey(id: number): Promise<string> {
+    const data = await this.request<unknown>('POST', `/api/token/${id}/key`)
+    if (typeof data === 'string') return data
+    if (data && typeof data === 'object') {
+      for (const field of ['key', 'apiKey', 'api_key', 'secret']) {
+        const value = Reflect.get(data, field)
+        if (typeof value === 'string') return value
+      }
+    }
+    throw new BotcfError('BotCF 密钥揭示接口未返回 Key')
+  }
+
+  /** Delete one of this application's own keys before rotating it. */
+  async deleteToken(id: number): Promise<void> {
+    await this.request<unknown>('DELETE', `/api/token/${id}`)
   }
 
   /** GET /api/log/self/stat — aggregate used quota + rpm/tpm. */
