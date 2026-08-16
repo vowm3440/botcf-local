@@ -48,4 +48,6 @@
 
 1. 分组专用 Key 命名规范:`omp-local-<deviceId>-<groupSlug>`;只查找/创建本软件自己的 Key,绝不修改用户已有共享 Key。
 2. `/api/pricing` 已作为分组全集来源接入(取顶层 `usable_group`/`group_ratio` 与每模型 `enable_groups`,信封需整体读取而非仅 `data`)。解析为宽容模式:接口 401/404/形状漂移时自动降级回「默认分组+Key 分组」聚合。实际形状仍待对 BotCF 实测确认。
-3. 验证过程中创建的测试 Key `omp-local-verify`(500K 额度)留在账户中,可在控制台删除。
+3. `/api/user/self/groups`(New API 控制台建 Key 下拉框的数据源,用户级)已接入为最优先的分组全集来源,形状同样宽容解析、失败静默降级;`GET /api/groups/debug` 返回各来源的实际形状与提取结果,供实测诊断。
+4. 非外接 Claude-Max 分组:BotCF 文档标记为 Claude Code 专用。应用现允许选择并在 UI 显示 ⚠ 警告,上游是否拒绝以实测为准。
+5. 验证过程中创建的测试 Key `omp-local-verify`(500K 额度)留在账户中,可在控制台删除。

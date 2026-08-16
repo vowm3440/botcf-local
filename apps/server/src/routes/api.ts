@@ -1,9 +1,9 @@
 import { FastifyInstance } from 'fastify'
 import { appState, applyActiveRouteToOmp, persistBotcfSession, clearBotcfSession, persistRoute } from '../appState.js'
 import { BotcfError } from '../botcf/adapter.js'
-import { ensureDedicatedKey } from '../botcf/keys.js'
+import { ensureDedicatedKey, discoverGroups } from '../botcf/keys.js'
 import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup } from '../catalog/routing.js'
-import { getPricingCatalog, listUserGroups, modelAllowedInGroup } from '../catalog/groupCatalog.js'
+import { extractPricingGroups, extractSelfGroups, getSiteCatalog, listUserGroups, mergeGroups, modelAllowedInGroup } from '../catalog/groupCatalog.js'
 import { ensureCapability, capabilityLabel, compactionThreshold, routeKey } from '../catalog/capability.js'
 import { setActiveRoute } from '../proxy/credentialProxy.js'
 import { ompClient } from '../omp/rpc.js'
@@ -103,10 +103,32 @@ export function registerApiRoutes(app: FastifyInstance): void {
     }
   })
 
+  /** Diagnostics: what each discovery source actually returned, so shape
+   *  drift on BotCF's side is visible instead of silently shrinking the list. */
+  app.get('/api/groups/debug', async () => {
+    const describeShape = (value: unknown): string => {
+      if (value === null) return 'null(接口不可用或返回失败)'
+      if (Array.isArray(value)) return `array(${value.length})`
+      if (typeof value === 'object') return `object keys: ${Object.keys(value as object).slice(0, 15).join(', ')}`
+      return typeof value
+    }
+    const base = await discoverGroups(appState.botcf)
+    const [selfRaw, pricingRaw] = await Promise.all([appState.botcf.selfGroups(), appState.botcf.pricing()])
+    const self = extractSelfGroups(selfRaw)
+    const pricing = extractPricingGroups(pricingRaw)
+    return {
+      success: true,
+      base,
+      selfGroups: { shape: describeShape(selfRaw), groups: self.groups },
+      pricing: { shape: describeShape(pricingRaw), groups: pricing.groups, modelsWithGroups: Object.keys(pricing.modelGroups).length },
+      merged: mergeGroups(base, self.groups, pricing.groups).map((name) => ({ name, ...classifyGroup(name) }))
+    }
+  })
+
   app.get<{ Querystring: { group?: string } }>('/api/models', async (req) => {
     const group = req.query.group ?? ''
     const policy = classifyGroup(group)
-    const [all, catalog] = await Promise.all([appState.botcf.models(), getPricingCatalog(appState.botcf)])
+    const [all, catalog] = await Promise.all([appState.botcf.models(), getSiteCatalog(appState.botcf)])
     const models = all
       .filter(isSelectableModel)
       // Real per-model group data from pricing wins; the name-family heuristic

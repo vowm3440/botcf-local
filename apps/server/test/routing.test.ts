@@ -12,14 +12,17 @@ describe('classifyGroup', () => {
     expect(classifyGroup('claude-kiro')).toMatchObject({ apiType: 'messages', usable: true })
   })
 
-  it('Claude-Max is visible but disabled (Claude Code only)', () => {
+  it('Claude-Max is selectable but carries a Claude-Code-only warning', () => {
     const p = classifyGroup('Claude-Max')
-    expect(p.usable).toBe(false)
+    expect(p.usable).toBe(true)
     expect(p.hidden).toBe(false)
+    expect(p.reason).toBeTruthy()
   })
 
-  it('Claude-Max-外接 IS usable', () => {
-    expect(classifyGroup('Claude-Max-外接').usable).toBe(true)
+  it('Claude-Max-外接 IS usable without a warning', () => {
+    const p = classifyGroup('Claude-Max-外接')
+    expect(p.usable).toBe(true)
+    expect(p.reason).toBeUndefined()
   })
 
   it('image/video groups are hidden from the picker', () => {

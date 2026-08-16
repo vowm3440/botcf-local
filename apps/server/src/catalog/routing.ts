@@ -24,10 +24,12 @@ export function classifyGroup(group: string): GroupPolicy {
     return { apiType: 'responses', usable: true, hidden: false }
   }
   if (n.includes('claude')) {
-    // Claude-Max (non-外接) is Claude-Code-only per BotCF docs.
+    // BotCF docs mark non-外接 Claude-Max as Claude-Code-only. Per user
+    // request these stay selectable — the upstream may still reject
+    // non-Claude-Code clients, so the reason is surfaced as a warning.
     const isExternal = n.includes('外接') || group.includes('外接')
     if (n.includes('max') && !isExternal) {
-      return { apiType: 'messages', usable: false, hidden: false, reason: 'BotCF 标记为仅 Claude Code 使用' }
+      return { apiType: 'messages', usable: true, hidden: false, reason: 'BotCF 标记为 Claude Code 专用,非 Claude Code 客户端可能被上游拒绝' }
     }
     return { apiType: 'messages', usable: true, hidden: false }
   }

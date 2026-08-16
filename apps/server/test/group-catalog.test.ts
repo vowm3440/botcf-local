@@ -1,5 +1,28 @@
 import { describe, expect, it } from 'vitest'
-import { extractPricingGroups, mergeGroups, modelAllowedInGroup } from '../src/catalog/groupCatalog.js'
+import { extractPricingGroups, extractSelfGroups, mergeGroups, modelAllowedInGroup } from '../src/catalog/groupCatalog.js'
+
+describe('extractSelfGroups', () => {
+  it('reads the New API self-groups map with ratio/desc objects', () => {
+    expect(extractSelfGroups({
+      default: { ratio: 1, desc: '默认分组' },
+      'claude-max': { ratio: 'auto', desc: 'Claude Max' }
+    })).toEqual({
+      groups: ['default', 'claude-max'],
+      descriptions: { default: '默认分组', 'claude-max': 'Claude Max' }
+    })
+  })
+
+  it('accepts name-to-string maps and plain arrays', () => {
+    expect(extractSelfGroups({ a: '甲' })).toEqual({ groups: ['a'], descriptions: { a: '甲' } })
+    expect(extractSelfGroups(['x', 'y', 3]).groups).toEqual(['x', 'y'])
+  })
+
+  it('tolerates junk payloads', () => {
+    expect(extractSelfGroups(null).groups).toEqual([])
+    expect(extractSelfGroups('str').groups).toEqual([])
+    expect(extractSelfGroups({ '': '空' }).groups).toEqual([])
+  })
+})
 
 describe('extractPricingGroups', () => {
   it('collects groups from usable_group, group_ratio and enable_groups', () => {

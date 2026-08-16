@@ -160,7 +160,7 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
           <option value="">选择分组…</option>
           {groups.map((g) => (
             <option key={g.name} value={g.name} disabled={!g.usable} title={g.reason ?? g.description}>
-              {g.name}{g.description ? ` — ${g.description}` : ''}{!g.usable ? '(不可用)' : ''}
+              {g.name}{g.description ? ` — ${g.description}` : ''}{!g.usable ? '(不可用)' : g.reason ? ' ⚠' : ''}
             </option>
           ))}
         </select>

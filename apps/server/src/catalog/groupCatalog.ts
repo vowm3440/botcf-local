@@ -87,25 +87,64 @@ export function modelAllowedInGroup(modelId: string, group: string, catalog: Pri
   return known.includes(normalizeGroupKey(group))
 }
 
+export interface SelfGroupsCatalog {
+  groups: string[]
+  descriptions: Record<string, string>
+}
+
+/** GET /api/user/self/groups payload: typically a map of group name to
+ *  {ratio, desc}; tolerate name->string maps, plain arrays, and junk. */
+export function extractSelfGroups(payload: unknown): SelfGroupsCatalog {
+  const groups: string[] = []
+  const descriptions: Record<string, string> = {}
+  if (Array.isArray(payload)) {
+    for (const name of payload) {
+      if (typeof name === 'string' && name.trim() && !groups.includes(name)) groups.push(name)
+    }
+    return { groups, descriptions }
+  }
+  if (!payload || typeof payload !== 'object') return { groups, descriptions }
+  for (const [name, value] of Object.entries(payload as Record<string, unknown>)) {
+    if (!name.trim() || groups.includes(name)) continue
+    groups.push(name)
+    if (typeof value === 'string' && value.trim()) {
+      descriptions[name] = value
+    } else if (value && typeof value === 'object') {
+      const item = value as Record<string, unknown>
+      const desc = item.desc ?? item.description
+      if (typeof desc === 'string' && desc.trim()) descriptions[name] = desc
+    }
+  }
+  return { groups, descriptions }
+}
+
 const CATALOG_TTL_MS = 5 * 60_000
 let cachedCatalog: PricingCatalog | null = null
 let cachedAt = 0
 
-/** TTL-cached pricing catalog; a failed or empty fetch keeps the last good
- *  snapshot so transient BotCF errors never blank the group list. */
-export async function getPricingCatalog(client: BotcfClient, force = false): Promise<PricingCatalog> {
+/** TTL-cached site catalog: /api/user/self/groups (the console's own group
+ *  picker source) merged with /api/pricing. A failed or empty fetch keeps the
+ *  last good snapshot so transient BotCF errors never blank the group list. */
+export async function getSiteCatalog(client: BotcfClient, force = false): Promise<PricingCatalog> {
   if (!force && cachedCatalog && Date.now() - cachedAt < CATALOG_TTL_MS) return cachedCatalog
-  const extracted = extractPricingGroups(await client.pricing())
-  const hasContent = extracted.groups.length > 0 || Object.keys(extracted.modelGroups).length > 0
+  const [selfRaw, pricingRaw] = await Promise.all([client.selfGroups(), client.pricing()])
+  const self = extractSelfGroups(selfRaw)
+  const pricing = extractPricingGroups(pricingRaw)
+  const combined: PricingCatalog = {
+    groups: mergeGroups(self.groups, pricing.groups),
+    descriptions: { ...pricing.descriptions, ...self.descriptions },
+    modelGroups: pricing.modelGroups
+  }
+  const hasContent = combined.groups.length > 0 || Object.keys(combined.modelGroups).length > 0
   if (hasContent || cachedCatalog === null) {
-    cachedCatalog = extracted
+    cachedCatalog = combined
     cachedAt = Date.now()
   }
   return cachedCatalog
 }
 
 /** Drop the cached catalog (logout / account switch). */
-export function resetPricingCatalog(): void {
+export function resetSiteCatalog(): void {
   cachedCatalog = null
   cachedAt = 0
 }
@@ -115,9 +154,9 @@ export interface UserGroup {
   description?: string
 }
 
-/** Default group + key-referenced groups + pricing-visible groups, deduped. */
+/** Default group + key-referenced groups + site-visible groups, deduped. */
 export async function listUserGroups(client: BotcfClient, force = false): Promise<UserGroup[]> {
-  const [base, catalog] = await Promise.all([discoverGroups(client), getPricingCatalog(client, force)])
+  const [base, catalog] = await Promise.all([discoverGroups(client), getSiteCatalog(client, force)])
   return mergeGroups(base, catalog.groups).map((name) => {
     const description = catalog.descriptions[name]
     return description ? { name, description } : { name }

@@ -210,6 +210,17 @@ export class BotcfClient {
     return { items: data.items ?? [], total: data.total ?? 0 }
   }
 
+  /** GET /api/user/self/groups — the console's own key-creation group picker
+   *  source on New API deployments; user-scoped and the most authoritative
+   *  visible-group list. Returns the data payload or null, never throws. */
+  async selfGroups(): Promise<unknown | null> {
+    try {
+      return await this.request<unknown>('GET', '/api/user/self/groups')
+    } catch {
+      return null
+    }
+  }
+
   /** GET /api/pricing — public on many New API deployments; used for group
    *  discovery since /api/group is admin-only on BotCF (verified 401).
    *  Returns the FULL response body: usable_group / group_ratio live at the
