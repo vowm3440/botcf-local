@@ -82,12 +82,14 @@ export function extractSiteStatus(payload: unknown): SiteStatus | null {
   }
 }
 
-/** Paths the pricing page's status data plausibly lives at. The known-existing
- *  '/api/models/status' goes first — it rejected token auth ("权限不足") but the
- *  browser succeeds with the session cookie, so fetchSiteStatus retries with a
- *  cookie-first header variant. */
+/** Paths the pricing page's status data plausibly lives at. The extractor
+ *  self-validates (needs a data.models array), so config-only responses are
+ *  skipped harmlessly. '/api/models/status' first: it rejects token auth
+ *  ("权限不足") but serves the browser's session cookie — DevTools shows its
+ *  Name as "status", so the user-reported '/api/status' is probed right after. */
 const CANDIDATE_PATHS = [
   '/api/models/status',
+  '/api/status',
   '/api/model/status',
   '/api/models/dashboard',
   '/api/model_dashboard',
