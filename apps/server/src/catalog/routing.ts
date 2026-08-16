@@ -69,3 +69,43 @@ export function modelMatchesGroup(group: string, modelId: string): boolean {
   if (g.includes('grok') && !g.includes('mix')) return id.startsWith('grok')
   return true
 }
+
+/** Third-party custom provider mode: user-supplied base URL + key + models. */
+export const THIRD_PARTY_GROUP = '第三方'
+
+/** OMP handles thinking via set_thinking_level regardless of wire protocol,
+ *  so third-party routes expose one fixed selectable set. */
+export const THIRD_PARTY_THINKING_LEVELS = ['off', 'low', 'medium', 'high']
+
+/** Wire protocol for a third-party model: claude family talks Anthropic
+ *  messages, everything else OpenAI-compatible chat completions. */
+export function thirdPartyApiType(modelId: string): ApiType {
+  return modelId.toLowerCase().startsWith('claude') ? 'messages' : 'chat'
+}
+
+/** Normalize a user-pasted base URL: trim, drop trailing slashes and a
+ *  trailing /v1 — the credential proxy appends wire paths itself. */
+export function normalizeBaseUrl(input: string): string | null {
+  const trimmed = input.trim().replace(/\/+$/, '').replace(/\/v1$/i, '').replace(/\/+$/, '')
+  if (!/^https?:\/\/\S+$/i.test(trimmed)) return null
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+  } catch {
+    return null
+  }
+  return trimmed
+}
+
+/** Parse the user's model list: comma/semicolon/newline/space separated, deduped. */
+export function parseModelList(input: string): string[] {
+  const seen = new Set<string>()
+  const models: string[] = []
+  for (const part of input.split(/[\n\r,;\s]+/)) {
+    const model = part.trim()
+    if (!model || seen.has(model)) continue
+    seen.add(model)
+    models.push(model)
+  }
+  return models
+}

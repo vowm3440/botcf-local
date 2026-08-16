@@ -2,7 +2,7 @@ import { FastifyInstance, FastifyReply } from 'fastify'
 import fs from 'node:fs'
 import path from 'node:path'
 import { request as undiciRequest } from 'undici'
-import { appState, applyActiveRouteToOmp } from '../appState.js'
+import { appState, applyActiveRouteToOmp, isAuthenticated } from '../appState.js'
 import { config } from '../config.js'
 import { getCapability, markVerified } from '../catalog/capability.js'
 import { applyToolEvent, emptyTurnFileState, extractToolFilePath, listChangedFiles } from '../omp/fileChanges.js'
@@ -382,7 +382,7 @@ export function normalizeAgentMessage(raw: unknown): Array<{ role: 'user' | 'ass
 
 export function registerChatRoutes(app: FastifyInstance): void {
   app.post<{ Body: { messages: ChatMessage[] } }>('/api/chat/stream', async (req, reply) => {
-    if (!appState.botcf.authenticated) {
+    if (!isAuthenticated()) {
       return reply.code(401).send({ success: false, error: '未登录' })
     }
     if (!appState.route) {

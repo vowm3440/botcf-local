@@ -31,6 +31,13 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
   const [workdirEditing, setWorkdirEditing] = useState(false)
   const [workdirInput, setWorkdirInput] = useState('')
 
+  const third = state.mode === 'third-party' ? state.thirdParty : null
+
+  // Third-party mode has exactly one pseudo group — keep it selected.
+  useEffect(() => {
+    if (third) setGroup('第三方')
+  }, [third])
+
   const refreshOmp = useCallback(() => {
     api.ompStatus().then((r) => {
       setOmpVersion(r.update.currentVersion)
@@ -92,6 +99,7 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
   const [lastRequest, setLastRequest] = useState<{ model: string; costUsd: number; promptTokens: number; completionTokens: number } | null>(null)
 
   const refreshUsage = useCallback(async () => {
+    if (state.mode === 'third-party') return
     try {
       const r = await api.usage()
       setUsage({ quotaUsd: r.account.quotaUsd, usedQuotaUsd: r.account.usedQuotaUsd })
@@ -104,7 +112,7 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
     } catch (e) {
       setSyncError(e instanceof Error ? e.message : '同步失败')
     }
-  }, [])
+  }, [state.mode])
 
   // Plan cadence: an extra refresh 2s and 15s after each completed turn, so the
   // billing panel converges with BotCF's ledger quickly.
@@ -147,24 +155,32 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
   return (
     <div style={{ borderBottom: '1px solid #ddd', padding: '10px 16px', background: '#fafafa', fontSize: 14 }}>
       <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span>
-          <strong>余额</strong> {usage ? `$${usage.quotaUsd.toFixed(2)}` : '—'} / 已用 {usage ? `$${usage.usedQuotaUsd.toFixed(2)}` : '—'}
-          {refreshedAt && <small style={{ color: '#888' }}> ({new Date(refreshedAt).toLocaleTimeString()} 已刷新)</small>}
-        </span>
-        {lastRequest && (
-          <span style={{ color: '#888' }} title={lastRequest.model}>
-            上次请求 ${lastRequest.costUsd.toFixed(4)} ({lastRequest.promptTokens}+{lastRequest.completionTokens} tok)
+        {third ? (
+          <span title={third.baseUrl} style={{ maxWidth: 380, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <strong>第三方</strong> <span style={{ color: '#888' }}>{third.baseUrl}</span>
           </span>
-        )}
+        ) : (
+          <>
+            <span>
+              <strong>余额</strong> {usage ? `$${usage.quotaUsd.toFixed(2)}` : '—'} / 已用 {usage ? `$${usage.usedQuotaUsd.toFixed(2)}` : '—'}
+              {refreshedAt && <small style={{ color: '#888' }}> ({new Date(refreshedAt).toLocaleTimeString()} 已刷新)</small>}
+            </span>
+            {lastRequest && (
+              <span style={{ color: '#888' }} title={lastRequest.model}>
+                上次请求 ${lastRequest.costUsd.toFixed(4)} ({lastRequest.promptTokens}+{lastRequest.completionTokens} tok)
+              </span>
+            )}
 
-        <select value={group} onFocus={() => loadGroups()} onChange={(e) => { setGroup(e.target.value); setModel('') }} disabled={busy}>
-          <option value="">选择分组…</option>
-          {groups.map((g) => (
-            <option key={g.name} value={g.name} disabled={!g.usable} title={g.reason ?? g.description}>
-              {g.name}{g.description ? ` — ${g.description}` : ''}{!g.usable ? '(不可用)' : g.reason ? ' ⚠' : ''}
-            </option>
-          ))}
-        </select>
+            <select value={group} onFocus={() => loadGroups()} onChange={(e) => { setGroup(e.target.value); setModel('') }} disabled={busy}>
+              <option value="">选择分组…</option>
+              {groups.map((g) => (
+                <option key={g.name} value={g.name} disabled={!g.usable} title={g.reason ?? g.description}>
+                  {g.name}{g.description ? ` — ${g.description}` : ''}{!g.usable ? '(不可用)' : g.reason ? ' ⚠' : ''}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
 
         <select value={model} onChange={(e) => { setModel(e.target.value); applyRoute(group, e.target.value, thinking) }} disabled={busy || !group}>
           <option value="">选择模型…</option>

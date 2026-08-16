@@ -12,6 +12,8 @@ export interface ActiveRoute {
   bearerKey: string
   modelId: string
   group: string
+  /** Third-party provider origin; BotCF's base URL when absent. */
+  baseUrl?: string
 }
 
 /** In-memory only — the key is sealed in SQLite, decrypted once per route switch,
@@ -32,10 +34,10 @@ const PATH_TO_API: Record<string, ActiveRoute['apiType']> = {
   '/v1/messages': 'messages'
 }
 
-function upstreamUrl(path: string): string {
+function upstreamUrl(route: ActiveRoute, path: string): string {
   // Anthropic-compatible messages live at /v1/messages on the bare domain;
   // OpenAI-compatible paths live under /v1. Both resolve to the same absolute path.
-  return config.botcfBaseUrl + path
+  return (route.baseUrl ?? config.botcfBaseUrl) + path
 }
 
 /** Extract the true limit from "maximum context length is 200000 tokens ..." style errors. */
@@ -106,7 +108,7 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
   }
 
   try {
-    const upstream = await undiciRequest(upstreamUrl(req.url), {
+    const upstream = await undiciRequest(upstreamUrl(route, req.url), {
       method: 'POST',
       headers,
       body: JSON.stringify(req.body ?? {}),

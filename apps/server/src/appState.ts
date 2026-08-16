@@ -1,6 +1,7 @@
 import { BotcfClient } from './botcf/adapter.js'
 import { ensureDedicatedKey } from './botcf/keys.js'
 import { resetSiteCatalog } from './catalog/groupCatalog.js'
+import { THIRD_PARTY_GROUP } from './catalog/routing.js'
 import { resetSiteStatus } from './catalog/siteStatus.js'
 import { setActiveRoute } from './proxy/credentialProxy.js'
 import { getSecret, putSecret, deleteSecret } from './db.js'
@@ -18,9 +19,17 @@ export interface ActiveRouteInfo {
   effectiveContext: number
 }
 
+/** Third-party custom provider (user-supplied endpoint). The API key is only
+ *  ever stored sealed; this public shape never carries it. */
+export interface ThirdPartyInfo {
+  baseUrl: string
+  models: string[]
+}
+
 /** Process-wide state shared by routes, proxy and updater. */
 export const appState = {
   botcf: new BotcfClient(),
+  thirdParty: null as ThirdPartyInfo | null,
   route: null as ActiveRouteInfo | null,
   generationInFlight: false,
   currentAbort: null as AbortController | null,
@@ -28,8 +37,14 @@ export const appState = {
   lastOmpUsage: { input: 0, output: 0 }
 }
 
+/** Either mode counts as logged in for the control plane and chat. */
+export function isAuthenticated(): boolean {
+  return appState.botcf.authenticated || appState.thirdParty !== null
+}
+
 const SESSION_SECRET = 'botcf.session-state'
 const ROUTE_SECRET = 'botcf.active-route'
+const THIRD_PARTY_SECRET = 'thirdparty.provider'
 
 export function persistBotcfSession(): void {
   putSecret(SESSION_SECRET, seal(JSON.stringify(appState.botcf.exportState())))
@@ -49,10 +64,43 @@ export function restoreBotcfSession(): boolean {
 export function clearBotcfSession(): void {
   deleteSecret(SESSION_SECRET)
   deleteSecret(ROUTE_SECRET)
+  deleteSecret(THIRD_PARTY_SECRET)
   appState.botcf = new BotcfClient()
+  appState.thirdParty = null
   appState.route = null
   resetSiteCatalog()
   resetSiteStatus()
+}
+
+/** Persist the third-party provider (key sealed) and activate the mode. */
+export function setThirdParty(info: { baseUrl: string; models: string[]; apiKey: string }): void {
+  putSecret(THIRD_PARTY_SECRET, seal(JSON.stringify(info)))
+  appState.thirdParty = { baseUrl: info.baseUrl, models: info.models }
+}
+
+/** Unseal the third-party API key on demand — never held on appState. */
+export function getThirdPartyKey(): string | null {
+  const sealed = getSecret(THIRD_PARTY_SECRET)
+  if (!sealed) return null
+  try {
+    const parsed = JSON.parse(open(sealed)) as { apiKey?: string }
+    return typeof parsed.apiKey === 'string' && parsed.apiKey ? parsed.apiKey : null
+  } catch {
+    return null
+  }
+}
+
+export function restoreThirdParty(): boolean {
+  const sealed = getSecret(THIRD_PARTY_SECRET)
+  if (!sealed) return false
+  try {
+    const parsed = JSON.parse(open(sealed)) as { baseUrl?: string; models?: string[] }
+    if (typeof parsed.baseUrl !== 'string' || !Array.isArray(parsed.models) || parsed.models.length === 0) return false
+    appState.thirdParty = { baseUrl: parsed.baseUrl, models: parsed.models.filter((m): m is string => typeof m === 'string') }
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function persistRoute(): void {
@@ -87,21 +135,35 @@ export async function applyActiveRouteToOmp(): Promise<boolean> {
 }
 
 /** After a restart the proxy has no credentials in memory. Restore the last
- *  route by re-fetching the dedicated key and re-arming the proxy, so the user
- *  lands back exactly where they left off. */
+ *  route by re-arming the proxy (BotCF: re-fetch the dedicated key; third-
+ *  party: unseal the stored key), so the user lands back where they left off. */
 export async function rearmRoute(): Promise<boolean> {
   const sealed = getSecret(ROUTE_SECRET)
-  if (!sealed || !appState.botcf.authenticated) return false
+  if (!sealed) return false
   try {
     const route = JSON.parse(open(sealed)) as ActiveRouteInfo
-    const dedicated = await ensureDedicatedKey(appState.botcf, route.group)
-    setActiveRoute({
-      routeKey: route.routeKey,
-      apiType: route.apiType,
-      bearerKey: dedicated.key,
-      modelId: route.modelId,
-      group: route.group
-    })
+    if (route.group === THIRD_PARTY_GROUP) {
+      const key = getThirdPartyKey()
+      if (!appState.thirdParty || !key) return false
+      setActiveRoute({
+        routeKey: route.routeKey,
+        apiType: route.apiType,
+        bearerKey: key,
+        modelId: route.modelId,
+        group: route.group,
+        baseUrl: appState.thirdParty.baseUrl
+      })
+    } else {
+      if (!appState.botcf.authenticated) return false
+      const dedicated = await ensureDedicatedKey(appState.botcf, route.group)
+      setActiveRoute({
+        routeKey: route.routeKey,
+        apiType: route.apiType,
+        bearerKey: dedicated.key,
+        modelId: route.modelId,
+        group: route.group
+      })
+    }
     appState.route = route
     try {
       await applyActiveRouteToOmp()

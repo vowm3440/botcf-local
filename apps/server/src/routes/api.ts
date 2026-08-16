@@ -1,8 +1,8 @@
 import { FastifyInstance } from 'fastify'
-import { appState, applyActiveRouteToOmp, persistBotcfSession, clearBotcfSession, persistRoute } from '../appState.js'
+import { appState, applyActiveRouteToOmp, persistBotcfSession, clearBotcfSession, persistRoute, isAuthenticated, setThirdParty, getThirdPartyKey } from '../appState.js'
 import { BotcfError } from '../botcf/adapter.js'
 import { ensureDedicatedKey, discoverGroups } from '../botcf/keys.js'
-import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup } from '../catalog/routing.js'
+import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup, normalizeBaseUrl, parseModelList, thirdPartyApiType, THIRD_PARTY_GROUP, THIRD_PARTY_THINKING_LEVELS } from '../catalog/routing.js'
 import { extractPricingGroups, extractSelfGroups, getSiteCatalog, listUserGroups, mergeGroups, modelAllowedInGroup } from '../catalog/groupCatalog.js'
 import { getModelHealth } from '../catalog/modelHealth.js'
 import { getSiteStatus } from '../catalog/siteStatus.js'
@@ -71,6 +71,22 @@ export function registerApiRoutes(app: FastifyInstance): void {
     }
   )
 
+  /** Third-party custom provider: user-supplied endpoint, key and models.
+   *  The key is sealed immediately and never returned to the frontend. */
+  app.post<{ Body: { baseUrl?: string; apiKey?: string; models?: string } }>(
+    '/api/auth/third-party',
+    async (req, reply) => {
+      const baseUrl = normalizeBaseUrl(req.body?.baseUrl ?? '')
+      const apiKey = (req.body?.apiKey ?? '').trim()
+      const models = parseModelList(req.body?.models ?? '')
+      if (!baseUrl) return reply.code(400).send({ success: false, error: 'Base URL 无效:需以 http(s):// 开头,不带 /v1' })
+      if (!apiKey) return reply.code(400).send({ success: false, error: '缺少 API Key' })
+      if (models.length === 0) return reply.code(400).send({ success: false, error: '至少填写一个模型 ID' })
+      setThirdParty({ baseUrl, apiKey, models })
+      return { success: true, thirdParty: { baseUrl, models } }
+    }
+  )
+
   app.post('/api/auth/logout', async () => {
     clearBotcfSession()
     setActiveRoute(null)
@@ -84,7 +100,9 @@ export function registerApiRoutes(app: FastifyInstance): void {
     }
     return {
       success: true,
-      authenticated: appState.botcf.authenticated,
+      authenticated: isAuthenticated(),
+      mode: appState.thirdParty ? 'third-party' : 'botcf',
+      thirdParty: appState.thirdParty,
       user,
       route: appState.route,
       omp: { available: ompClient.available, running: ompClient.running },
@@ -95,6 +113,12 @@ export function registerApiRoutes(app: FastifyInstance): void {
   /** Merged group list (default + key groups + pricing). ?refresh=1 bypasses
    *  the 5-minute pricing cache for the manual sync button. */
   app.get<{ Querystring: { refresh?: string } }>('/api/groups', async (req) => {
+    if (appState.thirdParty) {
+      return {
+        success: true,
+        groups: [{ name: THIRD_PARTY_GROUP, description: appState.thirdParty.baseUrl, apiType: 'chat', usable: true, hidden: false }]
+      }
+    }
     const groups = await listUserGroups(appState.botcf, req.query.refresh === '1')
     return {
       success: true,
@@ -129,6 +153,23 @@ export function registerApiRoutes(app: FastifyInstance): void {
 
   app.get<{ Querystring: { group?: string } }>('/api/models', async (req) => {
     const group = req.query.group ?? ''
+    if (appState.thirdParty && group === THIRD_PARTY_GROUP) {
+      return {
+        success: true,
+        models: appState.thirdParty.models.map((id) => {
+          const apiType = thirdPartyApiType(id)
+          const cap = ensureCapability(THIRD_PARTY_GROUP, id, apiType)
+          return {
+            id,
+            apiType,
+            thinkingLevels: THIRD_PARTY_THINKING_LEVELS,
+            contextLabel: capabilityLabel(cap),
+            effectiveContext: cap.effective_context,
+            confidence: cap.confidence
+          }
+        })
+      }
+    }
     const policy = classifyGroup(group)
     const [all, catalog] = await Promise.all([appState.botcf.models(), getSiteCatalog(appState.botcf)])
     const models = all
@@ -153,6 +194,55 @@ export function registerApiRoutes(app: FastifyInstance): void {
   app.post<{ Body: { group: string; model: string; thinkingLevel?: string } }>('/api/route', async (req, reply) => {
     const { group, model, thinkingLevel } = req.body ?? ({} as never)
     if (!group || !model) return reply.code(400).send({ success: false, error: '缺少 group 或 model' })
+
+    if (group === THIRD_PARTY_GROUP) {
+      if (!appState.thirdParty) return reply.code(409).send({ success: false, error: '未配置第三方提供商' })
+      if (!appState.thirdParty.models.includes(model)) {
+        return reply.code(400).send({ success: false, error: '模型不在第三方模型列表中' })
+      }
+      const bearer = getThirdPartyKey()
+      if (!bearer) return reply.code(409).send({ success: false, error: '第三方凭据缺失,请退出后重新配置' })
+      const apiType = thirdPartyApiType(model)
+      const level = thinkingLevel && THIRD_PARTY_THINKING_LEVELS.includes(thinkingLevel) ? thinkingLevel : 'medium'
+      const cap = ensureCapability(group, model, apiType)
+      const rk = routeKey(group, model, apiType)
+
+      setActiveRoute({ routeKey: rk, apiType, bearerKey: bearer, modelId: model, group, baseUrl: appState.thirdParty.baseUrl })
+      appState.route = {
+        group,
+        modelId: model,
+        apiType,
+        thinkingLevel: level,
+        routeKey: rk,
+        tokenName: '第三方 Key',
+        capabilityLabel: capabilityLabel(cap),
+        effectiveContext: cap.effective_context
+      }
+      getDb()
+        .prepare('INSERT INTO session_routes(session_id, changed_at, group_name, model_id, api_type, token_name) VALUES(?,?,?,?,?,?)')
+        .run('default', Date.now(), group, model, apiType, '第三方 Key')
+      persistRoute()
+
+      let ompApplied = false
+      if (ompClient.running) {
+        try {
+          ompApplied = await applyActiveRouteToOmp()
+        } catch (err: unknown) {
+          req.log.warn(`OMP set_model 失败,降级直连: ${err instanceof Error ? err.message : String(err)}`)
+          await ompClient.stop()
+        }
+      }
+      return {
+        success: true,
+        route: appState.route,
+        ompApplied,
+        compactionThreshold: compactionThreshold(cap.effective_context, cap.max_output)
+      }
+    }
+
+    if (!appState.botcf.authenticated) {
+      return reply.code(401).send({ success: false, error: '未登录 BotCF' })
+    }
 
     const policy = classifyGroup(group)
     if (!policy.usable) {

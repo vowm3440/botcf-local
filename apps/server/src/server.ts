@@ -6,7 +6,7 @@ import { getDb } from './db.js'
 import { initSecrets } from './secure/store.js'
 import { redact } from './secure/redact.js'
 import { isTrustedLocalRequest } from './secure/localRequest.js'
-import { appState, applyActiveRouteToOmp, restoreBotcfSession, rearmRoute } from './appState.js'
+import { appState, applyActiveRouteToOmp, restoreBotcfSession, restoreThirdParty, rearmRoute } from './appState.js'
 import { startCredentialProxy } from './proxy/credentialProxy.js'
 import { registerApiRoutes } from './routes/api.js'
 import { registerChatRoutes } from './routes/chat.js'
@@ -20,6 +20,7 @@ async function main(): Promise<void> {
   getDb()
 
   const restored = restoreBotcfSession()
+  const thirdRestored = restoreThirdParty()
 
   const app = Fastify({
     logger: {
@@ -83,13 +84,13 @@ async function main(): Promise<void> {
   }
   updater.startLoop()
 
-  if (restored) {
+  if (restored || thirdRestored) {
     rearmRoute()
       .then((ok) => app.log.info(`路由恢复: ${ok ? appState.route?.routeKey : '无已保存路由或恢复失败'}`))
       .catch(() => undefined)
   }
 
-  app.log.info(`botcf-local ready on http://${config.host}:${config.port} (BotCF session restored: ${restored})`)
+  app.log.info(`botcf-local ready on http://${config.host}:${config.port} (BotCF session restored: ${restored}, third-party restored: ${thirdRestored})`)
 }
 
 main().catch((err) => {

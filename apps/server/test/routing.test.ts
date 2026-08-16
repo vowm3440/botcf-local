@@ -1,6 +1,40 @@
 import { describe, expect, it } from 'vitest'
-import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup } from '../src/catalog/routing.js'
+import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup, normalizeBaseUrl, parseModelList, thirdPartyApiType, THIRD_PARTY_THINKING_LEVELS } from '../src/catalog/routing.js'
 import { normalizeGroupName, groupSlug, dedicatedKeyName, toBearerKey } from '../src/botcf/keys.js'
+
+describe('third-party provider helpers', () => {
+  it('normalizes base URLs: trims, strips trailing slashes and /v1', () => {
+    expect(normalizeBaseUrl('https://api.example.com/')).toBe('https://api.example.com')
+    expect(normalizeBaseUrl('  https://api.example.com/v1  ')).toBe('https://api.example.com')
+    expect(normalizeBaseUrl('https://api.example.com/v1/')).toBe('https://api.example.com')
+    expect(normalizeBaseUrl('http://127.0.0.1:8080')).toBe('http://127.0.0.1:8080')
+  })
+
+  it('rejects invalid base URLs', () => {
+    expect(normalizeBaseUrl('')).toBeNull()
+    expect(normalizeBaseUrl('api.example.com')).toBeNull()
+    expect(normalizeBaseUrl('ftp://x')).toBeNull()
+    expect(normalizeBaseUrl('https://bad url')).toBeNull()
+  })
+
+  it('parses model lists across commas, newlines and spaces, deduped', () => {
+    expect(parseModelList('gpt-4o, claude-4-sonnet\n gemini-2.5-pro;gpt-4o')).toEqual([
+      'gpt-4o', 'claude-4-sonnet', 'gemini-2.5-pro'
+    ])
+    expect(parseModelList('  \n ')).toEqual([])
+  })
+
+  it('routes claude models to messages and everything else to chat', () => {
+    expect(thirdPartyApiType('claude-4-sonnet')).toBe('messages')
+    expect(thirdPartyApiType('Claude-Opus')).toBe('messages')
+    expect(thirdPartyApiType('gpt-4o')).toBe('chat')
+    expect(thirdPartyApiType('glm-5')).toBe('chat')
+  })
+
+  it('exposes a fixed thinking-level set for third-party routes', () => {
+    expect(THIRD_PARTY_THINKING_LEVELS).toEqual(['off', 'low', 'medium', 'high'])
+  })
+})
 
 describe('classifyGroup', () => {
   it('codex groups use the Responses API', () => {

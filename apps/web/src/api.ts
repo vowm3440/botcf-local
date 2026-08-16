@@ -40,6 +40,8 @@ export interface RouteInfo {
 
 export interface AppStateInfo {
   authenticated: boolean
+  mode: 'botcf' | 'third-party'
+  thirdParty: { baseUrl: string; models: string[] } | null
   user: UserInfo | null
   route: RouteInfo | null
   omp: { available: boolean; running: boolean }
@@ -120,6 +122,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     }).then((r) => json<{ success: boolean; user: UserInfo }>(r)),
+
+  thirdPartyLogin: (payload: { baseUrl: string; apiKey: string; models: string }) =>
+    fetch('/api/auth/third-party', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then((r) => json<{ success: boolean; thirdParty: { baseUrl: string; models: string[] } }>(r)),
 
   logout: () => fetch('/api/auth/logout', { method: 'POST' }).then((r) => json<{ success: boolean }>(r)),
 

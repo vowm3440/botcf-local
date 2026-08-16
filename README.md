@@ -6,6 +6,7 @@
 ## 功能
 
 - **BotCF 账户接入**:账号密码或管理 Token 登录;余额/用量实时同步(按站点 `quota_per_unit` 换算美元)
+- **第三方提供商模式**:登录页第三种方式——自填 Base URL、API Key 与模型列表即可使用任意 OpenAI/Anthropic 兼容端点(claude 开头走 Messages,其余走 Chat Completions);Key 同样只存本机加密库、由凭据代理注入;顶栏显示端点地址、模型与思考等级选择,对话/工具/差异视图全部一致
 - **分组专用 Key**:为所选分组自动查找/创建 `omp-local-<设备ID>-<分组>` 专用 Key,绝不改动已有共享 Key
 - **动态模型目录**:分组聚合自默认分组、已有 Key、`/api/user/self/groups` 与公开 pricing 接口——未建过 Key 的分组同样可见;模型优先按 pricing 的 enable_groups 精确过滤,缺数据时回退家族启发式;图像/视频分组自动隐藏;分组每 5 分钟与网站自动同步,「立即同步」即时刷新;`/api/groups/debug` 可诊断各来源实际返回
 - **诚实的上下文能力库**:每条「分组+模型+接口」路由独立记录 declared/verified/effective 三层上下文与置信度(已验证/文档确认/推断),上游报 context 超限自动降级
@@ -95,7 +96,7 @@ docs/         BotCF 管理接口契约(实测)
 ## 测试
 
 ```bash
-npm test   # vitest:135 个测试,覆盖脱敏、代理授权、能力解析、路由、分组目录、模型健康、全站状态解析、updater、SSE/会话解析、变更文件跟踪、文件列表/内容接口
+npm test   # vitest:140 个测试,覆盖脱敏、代理授权、能力解析、路由、第三方模式、分组目录、模型健康、全站状态解析、updater、SSE/会话解析、变更文件跟踪、文件列表/内容接口
 ```
 
 ## 故障排查
