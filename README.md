@@ -11,6 +11,7 @@
 - **诚实的上下文能力库**:每条「分组+模型+接口」路由独立记录 declared/verified/effective 三层上下文与置信度(已验证/文档确认/推断),上游报 context 超限自动降级
 - **多接口路由**:codex 分组走 OpenAI Responses,claude 分组走 Anthropic Messages,其余走 Chat Completions;思考等级取三方交集
 - **凭据代理**:OMP/前端永远只接触 `127.0.0.1:7789` 本地代理,真实 Key 由代理注入;日志全量脱敏
+- **变更文件可见**:每轮回答结束展示 OMP 修改过的文件(点击定位 diff);侧栏文件面板浏览工作目录,变更文件带标记并随每轮自动刷新
 - **OMP Runtime 热更新**:GitHub Releases 自动跟版(快速/稳定/实验三通道)、SHA256 校验、空闲切换、健康检查失败秒级回滚;未安装 OMP 时自动降级为直连模式
 - **加密存储**:BotCF 会话与 Key 用 AES-256-GCM 加密落盘,master.key 权限 0600
 
@@ -93,7 +94,7 @@ docs/         BotCF 管理接口契约(实测)
 ## 测试
 
 ```bash
-npm test   # vitest:74 个测试,覆盖脱敏、代理授权、能力解析、路由、updater、SSE/会话解析
+npm test   # vitest:105 个测试,覆盖脱敏、代理授权、能力解析、路由、updater、SSE/会话解析、变更文件跟踪、文件列表接口
 ```
 
 ## 故障排查

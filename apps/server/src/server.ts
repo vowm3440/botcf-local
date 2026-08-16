@@ -10,6 +10,7 @@ import { appState, applyActiveRouteToOmp, restoreBotcfSession, rearmRoute } from
 import { startCredentialProxy } from './proxy/credentialProxy.js'
 import { registerApiRoutes } from './routes/api.js'
 import { registerChatRoutes } from './routes/chat.js'
+import { registerFileRoutes } from './routes/files.js'
 import { registerOmpRoutes, restoreWorkdir } from './routes/omp.js'
 import { ompClient } from './omp/rpc.js'
 import { OmpUpdater } from './omp/updater.js'
@@ -37,6 +38,7 @@ async function main(): Promise<void> {
 
   registerApiRoutes(app)
   registerChatRoutes(app)
+  registerFileRoutes(app)
 
   const updater = new OmpUpdater({
     isIdle: () => !appState.generationInFlight,

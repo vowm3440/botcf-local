@@ -5,6 +5,7 @@ import { request as undiciRequest } from 'undici'
 import { appState, applyActiveRouteToOmp } from '../appState.js'
 import { config } from '../config.js'
 import { getCapability, markVerified } from '../catalog/capability.js'
+import { applyToolEvent, emptyTurnFileState, extractToolFilePath, listChangedFiles } from '../omp/fileChanges.js'
 import { ompClient } from '../omp/rpc.js'
 import { redact } from '../secure/redact.js'
 
@@ -161,6 +162,8 @@ export interface ToolStreamEvent {
   name: string
   args?: unknown
   intent?: string
+  /** Target file extracted from the call arguments (start frames only). */
+  path?: string
   output?: string
   diff?: string
   isError?: boolean
@@ -195,6 +198,8 @@ export function normalizeToolEvent(msg: Record<string, unknown>): ToolStreamEven
   if (rawPhase === 'start') {
     event.args = msg.args
     if (typeof msg.intent === 'string') event.intent = msg.intent
+    const filePath = extractToolFilePath(msg.args)
+    if (filePath) event.path = filePath
   } else {
     const result = rawPhase === 'update' ? msg.partialResult : msg.result
     const output = toolResultText(result)
@@ -292,6 +297,7 @@ async function streamViaOmp(reply: FastifyReply, messages: ChatMessage[]): Promi
     fail = rej
   })
 
+  let fileState = emptyTurnFileState
   const onEvent = (msg: Record<string, unknown>): void => {
     const t = msg.type as string
     if (t === 'message_update') {
@@ -301,7 +307,10 @@ async function streamViaOmp(reply: FastifyReply, messages: ChatMessage[]): Promi
     }
     if (t === 'tool_execution_start' || t === 'tool_execution_update' || t === 'tool_execution_end') {
       const event = normalizeToolEvent(msg)
-      if (event) sseWrite(reply, event)
+      if (event) {
+        fileState = applyToolEvent(fileState, event, ompClient.workdir)
+        sseWrite(reply, event)
+      }
       return
     }
     if (t === 'agent_end' && (msg as { isTerminal?: boolean }).isTerminal !== false) {
@@ -321,6 +330,10 @@ async function streamViaOmp(reply: FastifyReply, messages: ChatMessage[]): Promi
     const ack = await ompClient.promptMessage(lastUser.content)
     if (!(ack && ack.agentInvoked === false)) {
       await finished
+    }
+    const changedFiles = listChangedFiles(fileState)
+    if (changedFiles.length > 0) {
+      sseWrite(reply, { type: 'files_changed', files: changedFiles })
     }
     const state = await ompClient.getState().catch(() => null)
     if (state?.contextUsage) {

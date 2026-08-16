@@ -54,6 +54,21 @@ export interface SessionSummary {
   updatedAt: number
 }
 
+export interface ChangedFileInfo {
+  path: string
+  tools: string[]
+  lastToolCallId: string
+  hasDiff: boolean
+  isError: boolean
+}
+
+export interface FileEntry {
+  name: string
+  type: 'dir' | 'file'
+  size: number
+  mtimeMs: number
+}
+
 async function json<T>(res: Response): Promise<T> {
   const body = (await res.json()) as T & { success?: boolean; error?: string }
   if (!res.ok || body.success === false) {
@@ -145,6 +160,11 @@ export const api = {
       body: JSON.stringify({ path })
     }).then((r) => json<{ success: boolean; workdir: string; restarted: boolean }>(r)),
 
+  files: (relPath: string) =>
+    fetch(`/api/omp/files?path=${encodeURIComponent(relPath)}`).then((r) =>
+      json<{ success: boolean; workdir: string | null; path: string; entries: FileEntry[]; truncated: boolean }>(r)
+    ),
+
   history: () =>
     fetch('/api/chat/history').then((r) =>
       json<{ success: boolean; source: 'omp' | 'local'; messages: Array<{ role: 'user' | 'assistant'; content: string }> }>(r)
@@ -184,7 +204,7 @@ export interface OmpUiRequest {
 }
 
 export interface StreamEvent {
-  type: 'delta' | 'usage' | 'done' | 'error' | 'aborted' | 'context' | 'tool'
+  type: 'delta' | 'usage' | 'done' | 'error' | 'aborted' | 'context' | 'tool' | 'files_changed'
   text?: string
   inputTokens?: number
   outputTokens?: number
@@ -197,9 +217,11 @@ export interface StreamEvent {
   name?: string
   args?: unknown
   intent?: string
+  path?: string
   output?: string
   diff?: string
   isError?: boolean
+  files?: ChangedFileInfo[]
 }
 
 /** POST /api/chat/stream and iterate normalized SSE events via fetch streaming. */

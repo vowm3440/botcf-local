@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { RouteInfo, streamChat, api, StreamEvent, SessionSummary } from '../api'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { RouteInfo, streamChat, api, StreamEvent, SessionSummary, ChangedFileInfo } from '../api'
+import FileTree from '../components/FileTree'
 
 interface ToolCall {
   id: string
@@ -15,6 +16,7 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   tools?: ToolCall[]
+  changedFiles?: ChangedFileInfo[]
 }
 
 interface ChatProps {
@@ -25,7 +27,7 @@ interface ChatProps {
 function ToolCard({ tool }: { tool: ToolCall }) {
   const status = tool.status === 'running' ? '执行中' : tool.status === 'error' ? '失败' : '完成'
   return (
-    <details open={tool.status === 'running'} style={{ marginTop: 8, border: `1px solid ${tool.status === 'error' ? '#efb4b4' : '#d9d9d9'}`, borderRadius: 6, background: '#fafafa' }}>
+    <details id={`tool-${tool.id}`} open={tool.status === 'running'} style={{ marginTop: 8, border: `1px solid ${tool.status === 'error' ? '#efb4b4' : '#d9d9d9'}`, borderRadius: 6, background: '#fafafa' }}>
       <summary style={{ cursor: 'pointer', padding: '8px 10px', fontWeight: 600 }}>
         {tool.name} <span style={{ color: tool.status === 'error' ? '#c00' : '#777', fontWeight: 400 }}>· {status}</span>
         {tool.intent && <span style={{ color: '#777', fontWeight: 400 }}> · {tool.intent}</span>}
@@ -58,6 +60,32 @@ function ToolCard({ tool }: { tool: ToolCall }) {
   )
 }
 
+/** Expand and scroll to the tool card that produced a file change. */
+function jumpToTool(toolCallId: string): void {
+  const el = document.getElementById(`tool-${toolCallId}`)
+  if (!el) return
+  el.setAttribute('open', '')
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+
+function ChangedFilesRow({ files }: { files: ChangedFileInfo[] }) {
+  return (
+    <div style={{ marginTop: 8, fontSize: 12 }}>
+      <span style={{ color: '#666' }}>本轮变更 {files.length} 个文件:</span>
+      {files.map((file) => (
+        <button
+          key={file.path}
+          onClick={() => jumpToTool(file.lastToolCallId)}
+          title={`${file.tools.join(', ')}${file.hasDiff ? ' · 点击查看差异' : ''}`}
+          style={{ marginLeft: 6, marginTop: 4, fontFamily: 'monospace', fontSize: 12, padding: '1px 6px', borderRadius: 4, cursor: 'pointer', border: `1px solid ${file.isError ? '#efb4b4' : '#cfe3cf'}`, background: file.isError ? '#fff2f0' : '#f2fbf2', color: file.isError ? '#c00' : '#2a7d46' }}
+        >
+          {file.path}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 export default function Chat({ route, ompRunning }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -67,8 +95,21 @@ export default function Chat({ route, ompRunning }: ChatProps) {
   const [notice, setNotice] = useState<string | null>(null)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [currentSessionPath, setCurrentSessionPath] = useState('')
+  const [showFiles, setShowFiles] = useState(true)
   const abortRef = useRef<AbortController | null>(null)
   const historyLoaded = useRef(false)
+
+  /** Session-cumulative changed files, merged across every turn's summary. */
+  const sessionChanged = useMemo(() => {
+    const merged = new Map<string, ChangedFileInfo>()
+    for (const message of messages) {
+      for (const file of message.changedFiles ?? []) {
+        const prev = merged.get(file.path)
+        merged.set(file.path, prev ? { ...file, tools: [...new Set([...prev.tools, ...file.tools])] } : file)
+      }
+    }
+    return merged
+  }, [messages])
 
   const loadHistory = useCallback(async () => {
     const response = await api.history()
@@ -141,6 +182,19 @@ export default function Chat({ route, ompRunning }: ChatProps) {
       appendToAssistant((content) => content + text)
     }
     if (ev.type === 'tool') updateTool(ev)
+    if (ev.type === 'files_changed' && ev.files) {
+      const files = ev.files
+      setMessages((prev) => {
+        const copy = [...prev]
+        for (let i = copy.length - 1; i >= 0; i--) {
+          if (copy[i].role === 'assistant') {
+            copy[i] = { ...copy[i], changedFiles: files }
+            return copy
+          }
+        }
+        return prev
+      })
+    }
     if (ev.type === 'usage') {
       setSessionTokens((prev) => ({ input: prev.input + (ev.inputTokens ?? 0), output: prev.output + (ev.outputTokens ?? 0) }))
     }
@@ -225,7 +279,8 @@ export default function Chat({ route, ompRunning }: ChatProps) {
   }
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', maxWidth: 960, width: '100%', margin: '0 auto', padding: 16, boxSizing: 'border-box', minHeight: 0 }}>
+    <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', maxWidth: 960, width: '100%', margin: '0 auto', padding: 16, boxSizing: 'border-box', minHeight: 0 }}>
       <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <span style={{ fontSize: 12, color: '#888', flex: 1 }}>{notice ?? ''}</span>
         {ompRunning && (
@@ -242,6 +297,11 @@ export default function Chat({ route, ompRunning }: ChatProps) {
           </select>
         )}
         <button onClick={newSession} disabled={streaming} style={{ fontSize: 12 }}>新会话</button>
+        {ompRunning && (
+          <button onClick={() => setShowFiles((prev) => !prev)} style={{ fontSize: 12 }}>
+            {showFiles ? '隐藏文件' : '文件'}
+          </button>
+        )}
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', border: '1px solid #ddd', borderRadius: 8, padding: 16, background: '#fff', minHeight: 0 }}>
@@ -251,6 +311,7 @@ export default function Chat({ route, ompRunning }: ChatProps) {
             <strong>{message.role === 'user' ? '你' : '助手'}:</strong>
             <div style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{message.content || (streaming && index === messages.length - 1 && !message.tools?.length ? '…' : '')}</div>
             {message.tools?.map((tool) => <ToolCard key={tool.id} tool={tool} />)}
+            {message.changedFiles && message.changedFiles.length > 0 && <ChangedFilesRow files={message.changedFiles} />}
           </div>
         ))}
       </div>
@@ -275,6 +336,8 @@ export default function Chat({ route, ompRunning }: ChatProps) {
         {route && <> · {route.apiType} · {route.capabilityLabel}</>}
         {ompRunning ? ' · OMP 会话' : ' · 直连模式'}
       </div>
+      </div>
+      {ompRunning && showFiles && <FileTree changed={sessionChanged} onJumpToTool={jumpToTool} />}
     </div>
   )
 }

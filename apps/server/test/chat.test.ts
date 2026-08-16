@@ -21,7 +21,7 @@ describe('extractSessionUsage', () => {
 })
 
 describe('normalizeToolEvent', () => {
-  it('keeps structured call arguments and intent', () => {
+  it('keeps structured call arguments, intent and the extracted file path', () => {
     expect(normalizeToolEvent({
       type: 'tool_execution_start',
       toolCallId: 'call-1',
@@ -34,8 +34,27 @@ describe('normalizeToolEvent', () => {
       id: 'call-1',
       name: 'edit',
       args: { path: 'src/app.ts' },
-      intent: 'Updating app'
+      intent: 'Updating app',
+      path: 'src/app.ts'
     })
+  })
+
+  it('extracts drifting file path field names on start frames', () => {
+    expect(normalizeToolEvent({
+      type: 'tool_execution_start',
+      toolCallId: 'call-2',
+      toolName: 'write',
+      args: { file_path: 'notes.md', content: 'x' }
+    })).toMatchObject({ phase: 'start', name: 'write', path: 'notes.md' })
+  })
+
+  it('omits the path field when arguments carry none', () => {
+    expect(normalizeToolEvent({
+      type: 'tool_execution_start',
+      toolCallId: 'call-3',
+      toolName: 'bash',
+      args: { command: 'ls' }
+    })).not.toHaveProperty('path')
   })
 
   it('extracts output and diff details from a completed call', () => {
