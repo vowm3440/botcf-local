@@ -71,6 +71,22 @@ export interface FileEntry {
   mtimeMs: number
 }
 
+export interface ModelHealthCell {
+  start: number
+  total: number
+  failed: number
+  state: 'ok' | 'warn' | 'error' | 'idle'
+}
+
+export interface ModelHealthInfo {
+  cells: ModelHealthCell[]
+  total: number
+  failed: number
+  faultRate: number | null
+  bucketMs: number
+  windowMs: number
+}
+
 async function json<T>(res: Response): Promise<T> {
   const body = (await res.json()) as T & { success?: boolean; error?: string }
   if (!res.ok || body.success === false) {
@@ -103,6 +119,11 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     }).then((r) => json<{ success: boolean; route: RouteInfo; compactionThreshold: number }>(r)),
+
+  modelHealth: (group: string, model: string) =>
+    fetch(`/api/model-health?group=${encodeURIComponent(group)}&model=${encodeURIComponent(model)}`).then((r) =>
+      json<{ success: boolean; health: ModelHealthInfo }>(r)
+    ),
 
   usage: () =>
     fetch('/api/usage').then((r) =>

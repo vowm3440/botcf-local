@@ -4,6 +4,7 @@ import { BotcfError } from '../botcf/adapter.js'
 import { ensureDedicatedKey, discoverGroups } from '../botcf/keys.js'
 import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup } from '../catalog/routing.js'
 import { extractPricingGroups, extractSelfGroups, getSiteCatalog, listUserGroups, mergeGroups, modelAllowedInGroup } from '../catalog/groupCatalog.js'
+import { getModelHealth } from '../catalog/modelHealth.js'
 import { ensureCapability, capabilityLabel, compactionThreshold, routeKey } from '../catalog/capability.js'
 import { setActiveRoute } from '../proxy/credentialProxy.js'
 import { ompClient } from '../omp/rpc.js'
@@ -245,4 +246,25 @@ export function registerApiRoutes(app: FastifyInstance): void {
   })
 
   app.get('/api/logs', async () => ({ success: true, logs: await appState.botcf.logs(0, 20) }))
+
+  /** Uptime-style cells + fault rate for one route, from the credential
+   *  proxy's own observations of every real upstream request. */
+  app.get<{ Querystring: { group?: string; model?: string } }>('/api/model-health', async (req, reply) => {
+    const group = req.query.group ?? ''
+    const model = req.query.model ?? ''
+    if (!group || !model) return reply.code(400).send({ success: false, error: '缺少 group 或 model' })
+    return { success: true, health: getModelHealth(group, model) }
+  })
+
+  /** Shape discovery for the site's own status source (pending live contract). */
+  app.get('/api/model-health/debug', async () => {
+    const raw = await appState.botcf.uptimeStatus()
+    return {
+      success: true,
+      uptimeStatus: {
+        available: raw !== null,
+        preview: raw === null ? null : JSON.stringify(raw).slice(0, 2000)
+      }
+    }
+  })
 }

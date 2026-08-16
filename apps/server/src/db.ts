@@ -46,6 +46,16 @@ function migrate(d: DatabaseSync): void {
       api_type TEXT NOT NULL,
       token_name TEXT NOT NULL             -- dedicated key NAME only; the key itself lives sealed in secrets
     );
+
+    CREATE TABLE IF NOT EXISTS model_probes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      group_name TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      ok INTEGER NOT NULL,                 -- 1 = upstream answered < 400
+      status INTEGER NOT NULL              -- HTTP status; 0 = network failure
+    );
+    CREATE INDEX IF NOT EXISTS idx_model_probes_route_ts ON model_probes(group_name, model_id, ts);
   `)
 }
 

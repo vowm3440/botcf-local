@@ -210,6 +210,19 @@ export class BotcfClient {
     return { items: data.items ?? [], total: data.total ?? 0 }
   }
 
+  /** GET /api/uptime/status — some New API deployments serve the site's own
+   *  model-status page from here. Raw full body for shape discovery via
+   *  /api/model-health/debug; null on any failure, never throws. */
+  async uptimeStatus(): Promise<unknown | null> {
+    try {
+      const res = await fetch(config.botcfBaseUrl + '/api/uptime/status', { headers: this.headers() })
+      if (!res.ok) return null
+      return await res.json()
+    } catch {
+      return null
+    }
+  }
+
   /** GET /api/user/self/groups — the console's own key-creation group picker
    *  source on New API deployments; user-scoped and the most authoritative
    *  visible-group list. Returns the data payload or null, never throws. */

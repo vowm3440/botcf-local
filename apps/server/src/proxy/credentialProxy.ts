@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 import { config } from '../config.js'
 import { redact } from '../secure/redact.js'
 import { recordContextError } from '../catalog/capability.js'
+import { recordProbe } from '../catalog/modelHealth.js'
 
 export interface ActiveRoute {
   routeKey: string
@@ -95,6 +96,15 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
   const abort = new AbortController()
   req.raw.on('aborted', () => abort.abort())
 
+  /** Health probe bookkeeping must never break the data path. */
+  const probe = (ok: boolean, status: number): void => {
+    try {
+      recordProbe(route.group, route.modelId, ok, status)
+    } catch {
+      // SQLite hiccups are irrelevant to the in-flight request.
+    }
+  }
+
   try {
     const upstream = await undiciRequest(upstreamUrl(req.url), {
       method: 'POST',
@@ -104,6 +114,7 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
     })
 
     if (upstream.statusCode >= 400) {
+      probe(false, upstream.statusCode)
       const text = await upstream.body.text()
       if (isContextError(upstream.statusCode, text)) {
         const next = recordContextError(route.routeKey, parseContextLimit(text))
@@ -115,6 +126,7 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
       return
     }
 
+    probe(true, upstream.statusCode)
     reply.raw.writeHead(upstream.statusCode, {
       'content-type': (upstream.headers['content-type'] as string) ?? 'application/json',
       'cache-control': 'no-cache'
@@ -128,6 +140,7 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
       if (!reply.raw.headersSent) reply.code(499).send({ error: { message: '客户端已中止请求' } })
       return
     }
+    probe(false, 0)
     req.log.error(redact(err instanceof Error ? err.message : String(err)))
     if (!reply.raw.headersSent) {
       reply.code(502).send({ error: { message: '上游请求失败' } })

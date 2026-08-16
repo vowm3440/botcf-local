@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, AppStateInfo, GroupInfo, ModelInfo } from '../api'
+import ModelHealthBar from './ModelHealthBar'
 
 interface TopBarProps {
   state: AppStateInfo
@@ -300,6 +301,7 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
         >立即同步</button>
         <button onClick={() => api.logout().then(onRouteChanged)}>退出</button>
       </div>
+      {state.route && <ModelHealthBar group={state.route.group} model={state.route.modelId} />}
       {error && <div style={{ color: '#c00', marginTop: 6 }}>{error}</div>}
       {syncError && <div style={{ color: '#c60', marginTop: 6 }}>用量同步失败: {syncError}</div>}
     </div>
