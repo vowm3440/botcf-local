@@ -234,7 +234,7 @@ export class BotcfClient {
     }
     const variants: Array<Record<string, string>> = []
     if (this.sessionCookie) {
-      const cookieOnly = { ...base, Cookie: this.sessionCookie }
+      const cookieOnly: Record<string, string> = { ...base, Cookie: this.sessionCookie }
       if (this.userId !== null) cookieOnly['New-Api-User'] = String(this.userId)
       variants.push(cookieOnly)
     }
