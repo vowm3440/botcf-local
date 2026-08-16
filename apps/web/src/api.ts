@@ -87,6 +87,22 @@ export interface ModelHealthInfo {
   windowMs: number
 }
 
+export interface SiteModelHealthInfo {
+  model: string
+  requests: number
+  errors: number
+  errorRate: number | null
+  avgTtftSeconds: number | null
+  throughputTps: number | null
+  cells: ModelHealthCell[]
+}
+
+export interface SiteHealthMeta {
+  generatedAt: number
+  bucketMs: number
+  errorThreshold: number | null
+}
+
 async function json<T>(res: Response): Promise<T> {
   const body = (await res.json()) as T & { success?: boolean; error?: string }
   if (!res.ok || body.success === false) {
@@ -122,7 +138,7 @@ export const api = {
 
   modelHealth: (group: string, model: string) =>
     fetch(`/api/model-health?group=${encodeURIComponent(group)}&model=${encodeURIComponent(model)}`).then((r) =>
-      json<{ success: boolean; health: ModelHealthInfo }>(r)
+      json<{ success: boolean; health: ModelHealthInfo; site: SiteModelHealthInfo | null; siteMeta: SiteHealthMeta | null }>(r)
     ),
 
   usage: () =>

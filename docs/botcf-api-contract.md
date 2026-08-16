@@ -51,3 +51,4 @@
 3. `/api/user/self/groups`(New API 控制台建 Key 下拉框的数据源,用户级)已接入为最优先的分组全集来源,形状同样宽容解析、失败静默降级;`GET /api/groups/debug` 返回各来源的实际形状与提取结果,供实测诊断。
 4. 非外接 Claude-Max 分组:BotCF 文档标记为 Claude Code 专用。应用现允许选择并在 UI 显示 ⚠ 警告,上游是否拒绝以实测为准。
 5. 验证过程中创建的测试 Key `omp-local-verify`(500K 额度)留在账户中,可在控制台删除。
+6. 模型状态来源实测(2026-08-16):官网状态页为 `/pricing`,其数据形状已抓包确认——`{success, is_admin, data:{generated_at(秒), bucket_seconds:60, bucket_count:10, error_threshold:20, models:[{model, requests, successes, errors, success_rate, error_rate(百分比), avg_ttft_seconds, throughput_tps, buckets:[{start(秒), requests, successes, errors, error_rate}], display_state, ...}]}}`。服务路径未捕获,应用按候选列表自动探测并缓存命中路径;`/api/models/status` 对管理 Token 返回「权限不足」但可能接受会话 Cookie(已实现 Cookie 优先变体)。`/api/uptime/status` 可访问但 `data:[]`;`/api/status/models`、`/api/model_status`、`/api/monitor/status` 不存在。

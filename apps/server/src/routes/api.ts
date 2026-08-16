@@ -5,6 +5,7 @@ import { ensureDedicatedKey, discoverGroups } from '../botcf/keys.js'
 import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup } from '../catalog/routing.js'
 import { extractPricingGroups, extractSelfGroups, getSiteCatalog, listUserGroups, mergeGroups, modelAllowedInGroup } from '../catalog/groupCatalog.js'
 import { getModelHealth } from '../catalog/modelHealth.js'
+import { getSiteStatus } from '../catalog/siteStatus.js'
 import { ensureCapability, capabilityLabel, compactionThreshold, routeKey } from '../catalog/capability.js'
 import { setActiveRoute } from '../proxy/credentialProxy.js'
 import { ompClient } from '../omp/rpc.js'
@@ -247,13 +248,21 @@ export function registerApiRoutes(app: FastifyInstance): void {
 
   app.get('/api/logs', async () => ({ success: true, logs: await appState.botcf.logs(0, 20) }))
 
-  /** Uptime-style cells + fault rate for one route, from the credential
-   *  proxy's own observations of every real upstream request. */
+  /** Uptime-style cells + fault rate for one route: the site's own model
+   *  status (as on botcf.com/pricing) when reachable, plus the credential
+   *  proxy's local observations. */
   app.get<{ Querystring: { group?: string; model?: string } }>('/api/model-health', async (req, reply) => {
     const group = req.query.group ?? ''
     const model = req.query.model ?? ''
     if (!group || !model) return reply.code(400).send({ success: false, error: '缺少 group 或 model' })
-    return { success: true, health: getModelHealth(group, model) }
+    const { status: site } = await getSiteStatus(appState.botcf)
+    const siteModel = site?.models.find((m) => m.model.toLowerCase() === model.toLowerCase()) ?? null
+    return {
+      success: true,
+      health: getModelHealth(group, model),
+      site: siteModel,
+      siteMeta: site ? { generatedAt: site.generatedAt, bucketMs: site.bucketMs, errorThreshold: site.errorThreshold } : null
+    }
   })
 
   /** Shape discovery for the site's own status source (pending live contract):

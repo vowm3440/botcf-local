@@ -6,4 +6,5 @@ apps/desktop/release/
 data/
 apps/server/data/
 botcf_contract_result.txt
+response.txt
 *.key

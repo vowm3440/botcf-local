@@ -222,6 +222,37 @@ export class BotcfClient {
     }
   }
 
+  /** Status fetch with header variants: '/api/models/status' rejects access
+   *  tokens ("权限不足") but serves the browser's session cookie, so the
+   *  cookie-only variant goes first. Rejected envelopes (success:false) are
+   *  treated as misses so discovery can move on. */
+  async fetchSiteStatus(path: string): Promise<unknown | null> {
+    const base: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'User-Agent': 'botcf-local/0.1'
+    }
+    const variants: Array<Record<string, string>> = []
+    if (this.sessionCookie) {
+      const cookieOnly = { ...base, Cookie: this.sessionCookie }
+      if (this.userId !== null) cookieOnly['New-Api-User'] = String(this.userId)
+      variants.push(cookieOnly)
+    }
+    variants.push(this.headers())
+    for (const headers of variants) {
+      try {
+        const res = await fetch(config.botcfBaseUrl + path, { headers })
+        if (!res.ok) continue
+        const payload = (await res.json()) as { success?: boolean } | null
+        if (payload && typeof payload === 'object' && payload.success === false) continue
+        return payload
+      } catch {
+        // Try the next header variant.
+      }
+    }
+    return null
+  }
+
   /** GET /api/user/self/groups — the console's own key-creation group picker
    *  source on New API deployments; user-scoped and the most authoritative
    *  visible-group list. Returns the data payload or null, never throws. */
