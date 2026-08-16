@@ -1,8 +1,9 @@
 import { FastifyInstance } from 'fastify'
 import { appState, applyActiveRouteToOmp, persistBotcfSession, clearBotcfSession, persistRoute } from '../appState.js'
 import { BotcfError } from '../botcf/adapter.js'
-import { discoverGroups, ensureDedicatedKey } from '../botcf/keys.js'
+import { ensureDedicatedKey } from '../botcf/keys.js'
 import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup } from '../catalog/routing.js'
+import { getPricingCatalog, listUserGroups, modelAllowedInGroup } from '../catalog/groupCatalog.js'
 import { ensureCapability, capabilityLabel, compactionThreshold, routeKey } from '../catalog/capability.js'
 import { setActiveRoute } from '../proxy/credentialProxy.js'
 import { ompClient } from '../omp/rpc.js'
@@ -89,13 +90,15 @@ export function registerApiRoutes(app: FastifyInstance): void {
     }
   })
 
-  app.get('/api/groups', async () => {
-    const groups = await discoverGroups(appState.botcf)
+  /** Merged group list (default + key groups + pricing). ?refresh=1 bypasses
+   *  the 5-minute pricing cache for the manual sync button. */
+  app.get<{ Querystring: { refresh?: string } }>('/api/groups', async (req) => {
+    const groups = await listUserGroups(appState.botcf, req.query.refresh === '1')
     return {
       success: true,
-      groups: groups.map((name) => {
+      groups: groups.map(({ name, description }) => {
         const policy = classifyGroup(name)
-        return { name, ...policy }
+        return { name, ...(description ? { description } : {}), ...policy }
       })
     }
   })
@@ -103,10 +106,12 @@ export function registerApiRoutes(app: FastifyInstance): void {
   app.get<{ Querystring: { group?: string } }>('/api/models', async (req) => {
     const group = req.query.group ?? ''
     const policy = classifyGroup(group)
-    const all = await appState.botcf.models()
+    const [all, catalog] = await Promise.all([appState.botcf.models(), getPricingCatalog(appState.botcf)])
     const models = all
       .filter(isSelectableModel)
-      .filter((id) => modelMatchesGroup(group, id))
+      // Real per-model group data from pricing wins; the name-family heuristic
+      // only decides models the catalog has never heard of.
+      .filter((id) => modelAllowedInGroup(id, group, catalog) ?? modelMatchesGroup(group, id))
       .map((id) => {
       const cap = ensureCapability(group, id, policy.apiType)
       return {

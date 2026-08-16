@@ -211,10 +211,17 @@ export class BotcfClient {
   }
 
   /** GET /api/pricing — public on many New API deployments; used for group
-   *  discovery since /api/group is admin-only on BotCF (verified 401). */
+   *  discovery since /api/group is admin-only on BotCF (verified 401).
+   *  Returns the FULL response body: usable_group / group_ratio live at the
+   *  top level next to data, so the request() envelope unwrap would drop them.
+   *  Never throws — group discovery must degrade gracefully without pricing. */
   async pricing(): Promise<unknown | null> {
     try {
-      return await this.request<unknown>('GET', '/api/pricing')
+      const res = await fetch(config.botcfBaseUrl + '/api/pricing', { headers: this.headers() })
+      if (!res.ok) return null
+      const payload = (await res.json()) as { success?: boolean } | null
+      if (payload && typeof payload === 'object' && payload.success === false) return null
+      return payload
     } catch {
       return null
     }

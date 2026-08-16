@@ -17,6 +17,7 @@ export interface GroupInfo {
   usable: boolean
   hidden: boolean
   reason?: string
+  description?: string
 }
 
 export interface ModelInfo {
@@ -90,7 +91,8 @@ export const api = {
 
   logout: () => fetch('/api/auth/logout', { method: 'POST' }).then((r) => json<{ success: boolean }>(r)),
 
-  groups: () => fetch('/api/groups').then((r) => json<{ success: boolean; groups: GroupInfo[] }>(r)),
+  groups: (refresh = false) =>
+    fetch(`/api/groups${refresh ? '?refresh=1' : ''}`).then((r) => json<{ success: boolean; groups: GroupInfo[] }>(r)),
 
   models: (group: string) =>
     fetch(`/api/models?group=${encodeURIComponent(group)}`).then((r) => json<{ success: boolean; models: ModelInfo[] }>(r)),

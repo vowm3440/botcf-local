@@ -41,21 +41,43 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
     }).catch(() => setOmpVersion(null))
   }, [])
 
+  const loadGroups = useCallback(async (refresh = false) => {
+    try {
+      const r = await api.groups(refresh)
+      setGroups(r.groups.filter((g) => !g.hidden))
+    } catch (e) {
+      // Keep the last good list on transient failures; only surface the error.
+      setError(`分组加载失败: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, [])
+
+  const loadModels = useCallback(async (targetGroup: string) => {
+    try {
+      const r = await api.models(targetGroup)
+      setModels(r.models)
+      setError(null)
+    } catch (e) {
+      setModels([])
+      setError(`模型加载失败: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, [])
+
   useEffect(() => {
-    api.groups()
-      .then((r) => setGroups(r.groups.filter((g) => !g.hidden)))
-      .catch((e) => { setGroups([]); setError(`分组加载失败: ${e instanceof Error ? e.message : String(e)}`) })
+    loadGroups()
     refreshOmp()
-    const interval = setInterval(refreshOmp, 15_000)
-    return () => clearInterval(interval)
-  }, [refreshOmp])
+    const ompInterval = setInterval(refreshOmp, 15_000)
+    // 与网站保持同步:每 5 分钟强制绕过服务端 pricing 缓存重新拉取分组。
+    const groupsInterval = setInterval(() => loadGroups(true), 300_000)
+    return () => {
+      clearInterval(ompInterval)
+      clearInterval(groupsInterval)
+    }
+  }, [loadGroups, refreshOmp])
 
   useEffect(() => {
     if (!group) return
-    api.models(group)
-      .then((r) => { setModels(r.models); setError(null) })
-      .catch((e) => { setModels([]); setError(`模型加载失败: ${e instanceof Error ? e.message : String(e)}`) })
-  }, [group])
+    loadModels(group)
+  }, [group, loadModels])
 
   // Reflect server-side route restoration (e.g. after app restart) into the pickers.
   useEffect(() => {
@@ -134,11 +156,11 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
           </span>
         )}
 
-        <select value={group} onChange={(e) => { setGroup(e.target.value); setModel('') }} disabled={busy}>
+        <select value={group} onFocus={() => loadGroups()} onChange={(e) => { setGroup(e.target.value); setModel('') }} disabled={busy}>
           <option value="">选择分组…</option>
           {groups.map((g) => (
-            <option key={g.name} value={g.name} disabled={!g.usable} title={g.reason}>
-              {g.name}{!g.usable ? '(不可用)' : ''}
+            <option key={g.name} value={g.name} disabled={!g.usable} title={g.reason ?? g.description}>
+              {g.name}{g.description ? ` — ${g.description}` : ''}{!g.usable ? '(不可用)' : ''}
             </option>
           ))}
         </select>
@@ -268,7 +290,14 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
             <button style={{ marginLeft: 4 }} onClick={() => setWorkdirEditing(false)}>取消</button>
           </span>
         )}
-        <button onClick={refreshUsage} style={{ marginLeft: 'auto' }}>立即同步</button>
+        <button
+          onClick={() => {
+            refreshUsage()
+            loadGroups(true)
+            if (group) loadModels(group)
+          }}
+          style={{ marginLeft: 'auto' }}
+        >立即同步</button>
         <button onClick={() => api.logout().then(onRouteChanged)}>退出</button>
       </div>
       {error && <div style={{ color: '#c00', marginTop: 6 }}>{error}</div>}

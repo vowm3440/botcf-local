@@ -1,5 +1,6 @@
 import { BotcfClient } from './botcf/adapter.js'
 import { ensureDedicatedKey } from './botcf/keys.js'
+import { resetPricingCatalog } from './catalog/groupCatalog.js'
 import { setActiveRoute } from './proxy/credentialProxy.js'
 import { getSecret, putSecret, deleteSecret } from './db.js'
 import { seal, open } from './secure/store.js'
@@ -49,6 +50,7 @@ export function clearBotcfSession(): void {
   deleteSecret(ROUTE_SECRET)
   appState.botcf = new BotcfClient()
   appState.route = null
+  resetPricingCatalog()
 }
 
 export function persistRoute(): void {

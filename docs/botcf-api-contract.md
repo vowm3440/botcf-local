@@ -47,5 +47,5 @@
 ## 已知约束
 
 1. 分组专用 Key 命名规范:`omp-local-<deviceId>-<groupSlug>`;只查找/创建本软件自己的 Key,绝不修改用户已有共享 Key。
-2. `/api/pricing` 是否公开待补测(作为分组倍率的潜在来源)。
+2. `/api/pricing` 已作为分组全集来源接入(取顶层 `usable_group`/`group_ratio` 与每模型 `enable_groups`,信封需整体读取而非仅 `data`)。解析为宽容模式:接口 401/404/形状漂移时自动降级回「默认分组+Key 分组」聚合。实际形状仍待对 BotCF 实测确认。
 3. 验证过程中创建的测试 Key `omp-local-verify`(500K 额度)留在账户中,可在控制台删除。
