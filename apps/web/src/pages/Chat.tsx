@@ -92,6 +92,21 @@ export default function Chat({ route, ompRunning }: ChatProps) {
   const [viewerPath, setViewerPath] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const historyLoaded = useRef(false)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  /** Follow streaming output unless the user scrolled up to read. */
+  const stickToBottom = useRef(true)
+
+  const onListScroll = () => {
+    const el = listRef.current
+    if (!el) return
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }
+
+  // 滚动更新:流式内容追加时自动滚到底部,加载出下面的新内容。
+  useEffect(() => {
+    const el = listRef.current
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
+  }, [messages])
 
   /** Session-cumulative changed files, merged across every turn's summary. */
   const sessionChanged = useMemo(() => {
@@ -213,6 +228,7 @@ export default function Chat({ route, ompRunning }: ChatProps) {
   const send = async () => {
     const text = input.trim()
     if (!text || !route) return
+    stickToBottom.current = true
 
     if (streaming) {
       if (!ompRunning) return
@@ -308,7 +324,7 @@ export default function Chat({ route, ompRunning }: ChatProps) {
         )}
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', border: '1px solid #ddd', borderRadius: 8, padding: 16, background: '#fff', minHeight: 0 }}>
+      <div ref={listRef} onScroll={onListScroll} style={{ flex: 1, overflowY: 'auto', border: '1px solid #ddd', borderRadius: 8, padding: 16, background: '#fff', minHeight: 0 }}>
         {!route && <p style={{ color: '#888' }}>请先在顶部选择分组和模型。</p>}
         {messages.map((message, index) => (
           <div key={index} style={{ marginBottom: 14 }}>

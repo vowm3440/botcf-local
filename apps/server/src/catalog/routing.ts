@@ -42,15 +42,15 @@ export function isSelectableModel(modelId: string): boolean {
   return !/(image|imagine|banana|video|sora|embedding|tts|whisper|dall-e|midjourney)/i.test(modelId)
 }
 
-/** Thinking levels = intersection of what OMP supports (off|minimal|low|medium|
- *  high|xhigh|max), what the model family does, and what the BotCF route allows
- *  (BotCF documents low/medium/high for Codex). Chat-compat routes pick their
- *  thinking variant via the model id itself, so they expose no separate levels. */
+/** Unified effort ladder (user request): every model exposes the same five
+ *  levels. OMP applies them via set_thinking_level regardless of wire
+ *  protocol; direct-mode Responses calls clamp xhigh/max down to high. */
+export const UNIFIED_THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
+
 export function supportedThinkingLevels(apiType: ApiType, modelId: string): string[] {
-  if (apiType === 'responses') return ['low', 'medium', 'high']
-  if (apiType === 'messages') return ['off', 'low', 'medium', 'high']
+  void apiType
   void modelId
-  return []
+  return [...UNIFIED_THINKING_LEVELS]
 }
 
 export function baseUrlFor(apiType: ApiType, botcfBaseUrl: string): string {
@@ -74,8 +74,8 @@ export function modelMatchesGroup(group: string, modelId: string): boolean {
 export const THIRD_PARTY_GROUP = '第三方'
 
 /** OMP handles thinking via set_thinking_level regardless of wire protocol,
- *  so third-party routes expose one fixed selectable set. */
-export const THIRD_PARTY_THINKING_LEVELS = ['off', 'low', 'medium', 'high']
+ *  so third-party routes share the unified ladder. */
+export const THIRD_PARTY_THINKING_LEVELS = UNIFIED_THINKING_LEVELS
 
 /** Wire protocol for a third-party model: claude family talks Anthropic
  *  messages, everything else OpenAI-compatible chat completions. */

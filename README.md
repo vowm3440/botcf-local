@@ -10,7 +10,7 @@
 - **分组专用 Key**:为所选分组自动查找/创建 `omp-local-<设备ID>-<分组>` 专用 Key,绝不改动已有共享 Key
 - **动态模型目录**:分组聚合自默认分组、已有 Key、`/api/user/self/groups` 与公开 pricing 接口——未建过 Key 的分组同样可见;模型优先按 pricing 的 enable_groups 精确过滤,缺数据时回退家族启发式;图像/视频分组自动隐藏;分组每 5 分钟与网站自动同步,「立即同步」即时刷新;`/api/groups/debug` 可诊断各来源实际返回
 - **诚实的上下文能力库**:每条「分组+模型+接口」路由独立记录 declared/verified/effective 三层上下文与置信度(已验证/文档确认/推断),上游报 context 超限自动降级
-- **多接口路由**:codex 分组走 OpenAI Responses,claude 分组走 Anthropic Messages,其余走 Chat Completions;思考等级取三方交集
+- **多接口路由**:codex 分组走 OpenAI Responses,claude 分组走 Anthropic Messages,其余走 Chat Completions;所有模型统一提供思考等级 low/medium/high/xhigh/max(由 OMP set_thinking_level 应用;直连 Responses 模式将 xhigh/max 收敛为 high)
 - **凭据代理**:OMP/前端永远只接触 `127.0.0.1:7789` 本地代理,真实 Key 由代理注入;日志全量脱敏
 - **模型健康状态**:选好分组+模型后,顶栏显示两行状态——**网站全站**(与 botcf.com/pricing 相同的数据:逐分钟状态格、全站故障率、首字延迟、吞吐,含「无人在使用」)与**本机实测**(近 8 小时逐 10 分钟,来自本机凭据代理观测到的每一次真实请求);绿=正常/紫=部分失败/红=全部失败/灰=无请求
 - **变更文件可见**:每轮回答结束展示 OMP 修改过的文件;侧栏文件面板浏览工作目录(变更标记、每轮自动刷新),点击任意文件打开只读查看器,变更文件附带 GitHub 风格差异高亮视图
@@ -96,7 +96,7 @@ docs/         BotCF 管理接口契约(实测)
 ## 测试
 
 ```bash
-npm test   # vitest:140 个测试,覆盖脱敏、代理授权、能力解析、路由、第三方模式、分组目录、模型健康、全站状态解析、updater、SSE/会话解析、变更文件跟踪、文件列表/内容接口
+npm test   # vitest:139 个测试,覆盖脱敏、代理授权、能力解析、路由、第三方模式、分组目录、模型健康、全站状态解析、updater、SSE/会话解析、变更文件跟踪、文件列表/内容接口
 ```
 
 ## 故障排查

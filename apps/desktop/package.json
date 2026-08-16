@@ -1,6 +1,6 @@
 {
   "name": "botcf-desktop",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "description": "BotCF 本地控制台桌面版",
   "author": "botcf-local",

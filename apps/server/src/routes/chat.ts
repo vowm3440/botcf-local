@@ -26,8 +26,14 @@ export function buildUpstreamRequest(apiType: 'chat' | 'responses' | 'messages',
       input: messages.map((m) => ({ role: m.role, content: m.content })),
       stream: true
     }
-    if (thinkingLevel && ['low', 'medium', 'high'].includes(thinkingLevel)) {
-      body.reasoning = { effort: thinkingLevel }
+    if (thinkingLevel) {
+      // Upstream Responses APIs understand low/medium/high; the unified
+      // ladder's xhigh/max clamp down to high in direct mode (OMP mode
+      // applies them natively via set_thinking_level).
+      const effort = ['low', 'medium', 'high'].includes(thinkingLevel)
+        ? thinkingLevel
+        : thinkingLevel === 'xhigh' || thinkingLevel === 'max' ? 'high' : null
+      if (effort) body.reasoning = { effort }
     }
     return { path: '/v1/responses', body }
   }

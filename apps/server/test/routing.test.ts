@@ -31,8 +31,8 @@ describe('third-party provider helpers', () => {
     expect(thirdPartyApiType('glm-5')).toBe('chat')
   })
 
-  it('exposes a fixed thinking-level set for third-party routes', () => {
-    expect(THIRD_PARTY_THINKING_LEVELS).toEqual(['off', 'low', 'medium', 'high'])
+  it('exposes the unified thinking ladder for third-party routes', () => {
+    expect(THIRD_PARTY_THINKING_LEVELS).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
   })
 })
 
@@ -94,15 +94,12 @@ describe('toBearerKey', () => {
 })
 
 describe('supportedThinkingLevels', () => {
-  it('responses routes expose low/medium/high (BotCF documented ∩ OMP levels)', () => {
-    expect(supportedThinkingLevels('responses', 'gpt-5.6-terra')).toEqual(['low', 'medium', 'high'])
-  })
-  it('messages routes include off', () => {
-    expect(supportedThinkingLevels('messages', 'claude-kiro')).toEqual(['off', 'low', 'medium', 'high'])
-  })
-  it('chat routes pick thinking via model id, so no separate levels', () => {
-    expect(supportedThinkingLevels('chat', 'gemini-2.5-pro-nothinking')).toEqual([])
-    expect(supportedThinkingLevels('chat', 'gpt-4o')).toEqual([])
+  it('every route type exposes the unified five-level ladder', () => {
+    const levels = ['low', 'medium', 'high', 'xhigh', 'max']
+    expect(supportedThinkingLevels('responses', 'gpt-5.6-terra')).toEqual(levels)
+    expect(supportedThinkingLevels('messages', 'claude-kiro')).toEqual(levels)
+    expect(supportedThinkingLevels('chat', 'gemini-2.5-pro-nothinking')).toEqual(levels)
+    expect(supportedThinkingLevels('chat', 'gpt-4o')).toEqual(levels)
   })
 })
 

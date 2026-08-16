@@ -135,6 +135,11 @@ describe('buildUpstreamRequest', () => {
     expect(body.stream).toBe(true)
   })
 
+  it('clamps xhigh/max to high for direct responses calls', () => {
+    expect(buildUpstreamRequest('responses', 'gpt-5.6-terra', msgs, 'xhigh', 8192).body.reasoning).toEqual({ effort: 'high' })
+    expect(buildUpstreamRequest('responses', 'gpt-5.6-terra', msgs, 'max', 8192).body.reasoning).toEqual({ effort: 'high' })
+  })
+
   it('messages route hoists system prompt and sets max_tokens', () => {
     const { path, body } = buildUpstreamRequest('messages', 'claude-x', msgs, null, 4096)
     expect(path).toBe('/v1/messages')
