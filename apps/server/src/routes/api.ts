@@ -256,15 +256,14 @@ export function registerApiRoutes(app: FastifyInstance): void {
     return { success: true, health: getModelHealth(group, model) }
   })
 
-  /** Shape discovery for the site's own status source (pending live contract). */
+  /** Shape discovery for the site's own status source (pending live contract):
+   *  probe every plausible New API-family status path in one shot. */
   app.get('/api/model-health/debug', async () => {
-    const raw = await appState.botcf.uptimeStatus()
-    return {
-      success: true,
-      uptimeStatus: {
-        available: raw !== null,
-        preview: raw === null ? null : JSON.stringify(raw).slice(0, 2000)
-      }
-    }
+    const candidates = ['/api/uptime/status', '/api/status/models', '/api/model_status', '/api/models/status', '/api/monitor/status']
+    const probes = await Promise.all(candidates.map(async (path) => {
+      const raw = await appState.botcf.fetchStatusCandidate(path)
+      return { path, available: raw !== null, preview: raw === null ? null : JSON.stringify(raw).slice(0, 1500) }
+    }))
+    return { success: true, probes }
   })
 }

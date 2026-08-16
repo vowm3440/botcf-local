@@ -210,12 +210,11 @@ export class BotcfClient {
     return { items: data.items ?? [], total: data.total ?? 0 }
   }
 
-  /** GET /api/uptime/status — some New API deployments serve the site's own
-   *  model-status page from here. Raw full body for shape discovery via
-   *  /api/model-health/debug; null on any failure, never throws. */
-  async uptimeStatus(): Promise<unknown | null> {
+  /** Raw GET for status-endpoint shape discovery. Callers pass fixed
+   *  candidate paths only (never user input); null on any failure. */
+  async fetchStatusCandidate(path: string): Promise<unknown | null> {
     try {
-      const res = await fetch(config.botcfBaseUrl + '/api/uptime/status', { headers: this.headers() })
+      const res = await fetch(config.botcfBaseUrl + path, { headers: this.headers() })
       if (!res.ok) return null
       return await res.json()
     } catch {

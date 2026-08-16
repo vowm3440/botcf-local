@@ -69,6 +69,11 @@ export default function ModelHealthBar({ group, model }: ModelHealthBarProps) {
         故障率 {health.faultRate === null ? '—(窗口内无请求)' : `${(health.faultRate * 100).toFixed(1)}%`}
         {health.total > 0 && <> ({health.failed}/{health.total} 次失败)</>}
       </span>
+      {health.total === 0 && (
+        <span style={{ color: '#999' }}>
+          本机还没有该路由的请求记录——每次真实对话都会为当前时段着色;官网页面显示的是全站所有用户的状态,视角不同
+        </span>
+      )}
     </div>
   )
 }
