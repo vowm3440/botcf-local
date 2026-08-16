@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import path from 'node:path'
 import {
+  MAX_FILE_DIFF_CHARS,
   applyToolEvent,
   emptyTurnFileState,
   extractToolFilePath,
@@ -80,7 +81,7 @@ describe('applyToolEvent', () => {
       { phase: 'end', id: 't1', name: 'edit', diff: '-a\n+b' }
     ])
     expect(listChangedFiles(state)).toEqual([
-      { path: 'src/app.ts', tools: ['edit'], lastToolCallId: 't1', hasDiff: true, isError: false }
+      { path: 'src/app.ts', tools: ['edit'], lastToolCallId: 't1', hasDiff: true, isError: false, diff: '-a\n+b' }
     ])
   })
 
@@ -102,14 +103,15 @@ describe('applyToolEvent', () => {
     expect(listChangedFiles(state)).toHaveLength(1)
   })
 
-  it('picks up a diff that only appeared on an update frame', () => {
+  it('picks up the latest diff streamed on update frames', () => {
     const state = runEvents([
       { phase: 'start', id: 't1', name: 'search_replace', args: { path: 'x.ts' } },
       { phase: 'update', id: 't1', name: 'search_replace', diff: '+x' },
+      { phase: 'update', id: 't1', name: 'search_replace', diff: '+x\n+y' },
       { phase: 'end', id: 't1', name: 'search_replace' }
     ])
     expect(listChangedFiles(state)).toEqual([
-      { path: 'x.ts', tools: ['search_replace'], lastToolCallId: 't1', hasDiff: true, isError: false }
+      { path: 'x.ts', tools: ['search_replace'], lastToolCallId: 't1', hasDiff: true, isError: false, diff: '+x\n+y' }
     ])
   })
 
@@ -135,7 +137,7 @@ describe('applyToolEvent', () => {
       { phase: 'end', id: 't1', name: 'edit', diff: '+partial', isError: true }
     ])
     expect(listChangedFiles(failedWithDiff)).toEqual([
-      { path: 'a.ts', tools: ['edit'], lastToolCallId: 't1', hasDiff: true, isError: true }
+      { path: 'a.ts', tools: ['edit'], lastToolCallId: 't1', hasDiff: true, isError: true, diff: '+partial' }
     ])
   })
 
@@ -155,8 +157,31 @@ describe('applyToolEvent', () => {
       { phase: 'end', id: 't2', name: 'edit', diff: '+y' }
     ])
     expect(listChangedFiles(state)).toEqual([
-      { path: 'src/app.ts', tools: ['write', 'edit'], lastToolCallId: 't2', hasDiff: true, isError: false }
+      { path: 'src/app.ts', tools: ['write', 'edit'], lastToolCallId: 't2', hasDiff: true, isError: false, diff: '+y' }
     ])
+  })
+
+  it('accumulates diffs from repeated calls on the same file', () => {
+    const state = runEvents([
+      { phase: 'start', id: 't1', name: 'edit', args: { path: 'a.ts' } },
+      { phase: 'end', id: 't1', name: 'edit', diff: '+first' },
+      { phase: 'start', id: 't2', name: 'edit', args: { path: 'a.ts' } },
+      { phase: 'end', id: 't2', name: 'edit', diff: '+second' }
+    ])
+    expect(listChangedFiles(state)[0]?.diff).toBe('+first\n+second')
+  })
+
+  it('caps the accumulated diff, keeping the newest tail', () => {
+    const huge = 'x'.repeat(MAX_FILE_DIFF_CHARS)
+    const state = runEvents([
+      { phase: 'start', id: 't1', name: 'edit', args: { path: 'a.ts' } },
+      { phase: 'end', id: 't1', name: 'edit', diff: huge },
+      { phase: 'start', id: 't2', name: 'edit', args: { path: 'a.ts' } },
+      { phase: 'end', id: 't2', name: 'edit', diff: '+tail' }
+    ])
+    const diff = listChangedFiles(state)[0]?.diff ?? ''
+    expect(diff).toHaveLength(MAX_FILE_DIFF_CHARS)
+    expect(diff.endsWith('+tail')).toBe(true)
   })
 
   it('ignores end frames without a matching start', () => {

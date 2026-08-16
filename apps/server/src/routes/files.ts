@@ -20,6 +20,38 @@ export interface DirectoryListing {
 }
 
 export const MAX_DIR_ENTRIES = 500
+export const MAX_FILE_CONTENT_BYTES = 1024 * 1024
+
+/** NUL byte in the leading sample means the file is not renderable text. */
+export function isProbablyBinary(sample: Buffer): boolean {
+  const limit = Math.min(sample.length, 8192)
+  for (let i = 0; i < limit; i++) {
+    if (sample[i] === 0) return true
+  }
+  return false
+}
+
+export interface BoundedFileContent {
+  content: string
+  size: number
+  truncated: boolean
+  binary: boolean
+}
+
+/** Read at most `cap` bytes so the viewer never loads an unbounded file. */
+export function readFileBounded(file: string, cap = MAX_FILE_CONTENT_BYTES): BoundedFileContent {
+  const fd = fs.openSync(file, 'r')
+  try {
+    const size = fs.fstatSync(fd).size
+    const buffer = Buffer.allocUnsafe(Math.min(size, cap))
+    const read = fs.readSync(fd, buffer, 0, buffer.length, 0)
+    const sample = buffer.subarray(0, read)
+    const binary = isProbablyBinary(sample)
+    return { content: binary ? '' : sample.toString('utf8'), size, truncated: size > cap, binary }
+  } finally {
+    fs.closeSync(fd)
+  }
+}
 
 /** Pure string-level containment: resolve `requested` against `root`, refuse
  *  anything that escapes. Symlink escapes are caught by realpathInsideRoot. */
@@ -91,6 +123,29 @@ export function registerFileRoutes(app: FastifyInstance): void {
       const { entries, truncated } = listDirectory(target)
       const relPath = path.relative(fs.realpathSync.native(workdir), target).replace(/\\/g, '/')
       return { success: true, workdir, path: relPath, entries, truncated }
+    } catch (err: unknown) {
+      return reply.code(500).send({ success: false, error: err instanceof Error ? err.message : String(err) })
+    }
+  })
+
+  /** Read-only file content for the editor panel, bounded and text-only. */
+  app.get<{ Querystring: { path?: string } }>('/api/omp/file', async (req, reply) => {
+    const workdir = ompClient.workdir
+    if (!workdir || !fs.existsSync(workdir)) {
+      return reply.code(409).send({ success: false, error: '未设置工作目录' })
+    }
+    const target = realpathInsideRoot(workdir, req.query.path ?? '')
+    if (!target) {
+      return reply.code(400).send({ success: false, error: '路径不存在或越出工作目录' })
+    }
+    try {
+      const stat = fs.statSync(target)
+      if (!stat.isFile()) {
+        return reply.code(400).send({ success: false, error: '不是文件' })
+      }
+      const { content, size, truncated, binary } = readFileBounded(target)
+      const relPath = path.relative(fs.realpathSync.native(workdir), target).replace(/\\/g, '/')
+      return { success: true, path: relPath, size, mtimeMs: stat.mtimeMs, content, truncated, binary }
     } catch (err: unknown) {
       return reply.code(500).send({ success: false, error: err instanceof Error ? err.message : String(err) })
     }

@@ -4,7 +4,8 @@ import { api, ChangedFileInfo, FileEntry } from '../api'
 interface FileTreeProps {
   /** Cumulative per-session changed files, keyed by workdir-relative path. */
   changed: Map<string, ChangedFileInfo>
-  onJumpToTool: (toolCallId: string) => void
+  /** Open a file (workdir-relative path) in the editor drawer. */
+  onOpenFile: (path: string) => void
 }
 
 interface DirState {
@@ -14,7 +15,7 @@ interface DirState {
 
 /** Lazy workdir browser: only expanded directories are fetched, refreshed on
  *  every finished turn via the botcf:turn-complete window event. */
-export default function FileTree({ changed, onJumpToTool }: FileTreeProps) {
+export default function FileTree({ changed, onOpenFile }: FileTreeProps) {
   const [workdir, setWorkdir] = useState<string | null>(null)
   const [dirs, setDirs] = useState<Record<string, DirState>>({})
   const [error, setError] = useState<string | null>(null)
@@ -99,8 +100,9 @@ export default function FileTree({ changed, onJumpToTool }: FileTreeProps) {
           return (
             <div
               key={childRel}
-              title={change ? `本会话已修改 · ${change.tools.join(', ')}` : entry.name}
-              style={{ padding: '2px 4px', paddingLeft: 18 + depth * 14, fontSize: 12, color: change ? (change.isError ? '#c00' : '#2a7d46') : '#444', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+              onClick={() => onOpenFile(childRel)}
+              title={change ? `本会话已修改 · ${change.tools.join(', ')} · 点击查看` : `点击查看 ${entry.name}`}
+              style={{ cursor: 'pointer', padding: '2px 4px', paddingLeft: 18 + depth * 14, fontSize: 12, color: change ? (change.isError ? '#c00' : '#2a7d46') : '#444', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
             >
               {entry.name}
               {change && <span style={{ marginLeft: 4 }}>●</span>}
@@ -128,8 +130,8 @@ export default function FileTree({ changed, onJumpToTool }: FileTreeProps) {
           {changedList.map((file) => (
             <div
               key={file.path}
-              onClick={() => onJumpToTool(file.lastToolCallId)}
-              title={file.tools.join(', ')}
+              onClick={() => onOpenFile(file.path)}
+              title={`${file.tools.join(', ')} · 点击查看差异`}
               style={{ fontFamily: 'monospace', fontSize: 11, cursor: 'pointer', color: file.isError ? '#c00' : '#2a7d46', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', padding: '1px 0' }}
             >
               {file.path}

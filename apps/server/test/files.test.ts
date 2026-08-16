@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { listDirectory, realpathInsideRoot, resolveInsideRoot, sortEntries } from '../src/routes/files.js'
+import { isProbablyBinary, listDirectory, readFileBounded, realpathInsideRoot, resolveInsideRoot, sortEntries } from '../src/routes/files.js'
 
 const ROOT = path.resolve('rootdir')
 
@@ -35,6 +35,14 @@ describe('sortEntries', () => {
       { name: 'alpha', type: 'dir', size: 0, mtimeMs: 0 }
     ])
     expect(sorted.map((entry) => entry.name)).toEqual(['alpha', 'beta', 'a.txt', 'z.txt'])
+  })
+})
+
+describe('isProbablyBinary', () => {
+  it('treats NUL bytes as binary and plain text as text', () => {
+    expect(isProbablyBinary(Buffer.from('hello 世界\n'))).toBe(false)
+    expect(isProbablyBinary(Buffer.from([0x50, 0x4b, 0x00, 0x01]))).toBe(true)
+    expect(isProbablyBinary(Buffer.alloc(0))).toBe(false)
   })
 })
 
@@ -90,5 +98,25 @@ describe('filesystem-backed listing and containment', () => {
   it.skipIf(!escapeLink)('rejects symlink escapes out of the root', () => {
     expect(realpathInsideRoot(tmpRoot, 'esc')).toBeNull()
     expect(realpathInsideRoot(tmpRoot, 'esc/secret.txt')).toBeNull()
+  })
+
+  it('reads text file content with size metadata', () => {
+    const result = readFileBounded(path.join(tmpRoot, 'b.txt'))
+    expect(result).toEqual({ content: 'bb', size: 2, truncated: false, binary: false })
+  })
+
+  it('truncates content beyond the byte cap', () => {
+    const result = readFileBounded(path.join(tmpRoot, 'b.txt'), 1)
+    expect(result.content).toBe('b')
+    expect(result.truncated).toBe(true)
+    expect(result.size).toBe(2)
+  })
+
+  it('flags binary files and withholds their content', () => {
+    const binFile = path.join(tmpRoot, 'blob.bin')
+    fs.writeFileSync(binFile, Buffer.from([0x00, 0x01, 0x02]))
+    const result = readFileBounded(binFile)
+    expect(result.binary).toBe(true)
+    expect(result.content).toBe('')
   })
 })

@@ -60,6 +60,7 @@ export interface ChangedFileInfo {
   lastToolCallId: string
   hasDiff: boolean
   isError: boolean
+  diff?: string
 }
 
 export interface FileEntry {
@@ -163,6 +164,11 @@ export const api = {
   files: (relPath: string) =>
     fetch(`/api/omp/files?path=${encodeURIComponent(relPath)}`).then((r) =>
       json<{ success: boolean; workdir: string | null; path: string; entries: FileEntry[]; truncated: boolean }>(r)
+    ),
+
+  fileContent: (relPath: string) =>
+    fetch(`/api/omp/file?path=${encodeURIComponent(relPath)}`).then((r) =>
+      json<{ success: boolean; path: string; size: number; mtimeMs: number; content: string; truncated: boolean; binary: boolean }>(r)
     ),
 
   history: () =>

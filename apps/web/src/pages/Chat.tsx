@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RouteInfo, streamChat, api, StreamEvent, SessionSummary, ChangedFileInfo } from '../api'
+import DiffView from '../components/DiffView'
 import FileTree from '../components/FileTree'
+import FileViewer from '../components/FileViewer'
 
 interface ToolCall {
   id: string
@@ -48,11 +50,9 @@ function ToolCard({ tool }: { tool: ToolCall }) {
         {tool.diff && (
           <>
             <div style={{ fontSize: 12, color: '#666', marginTop: 6 }}>文件差异</div>
-            <pre style={{ margin: '4px 0', padding: 8, overflowX: 'auto', background: '#161b22', color: '#ddd', fontSize: 12 }}>
-              {tool.diff.split('\n').map((line, index) => (
-                <span key={index} style={{ display: 'block', color: line.startsWith('+') ? '#7ee787' : line.startsWith('-') ? '#ffa198' : undefined }}>{line || ' '}</span>
-              ))}
-            </pre>
+            <div style={{ margin: '4px 0' }}>
+              <DiffView diff={tool.diff} />
+            </div>
           </>
         )}
       </div>
@@ -60,23 +60,15 @@ function ToolCard({ tool }: { tool: ToolCall }) {
   )
 }
 
-/** Expand and scroll to the tool card that produced a file change. */
-function jumpToTool(toolCallId: string): void {
-  const el = document.getElementById(`tool-${toolCallId}`)
-  if (!el) return
-  el.setAttribute('open', '')
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-}
-
-function ChangedFilesRow({ files }: { files: ChangedFileInfo[] }) {
+function ChangedFilesRow({ files, onOpen }: { files: ChangedFileInfo[]; onOpen: (path: string) => void }) {
   return (
     <div style={{ marginTop: 8, fontSize: 12 }}>
       <span style={{ color: '#666' }}>本轮变更 {files.length} 个文件:</span>
       {files.map((file) => (
         <button
           key={file.path}
-          onClick={() => jumpToTool(file.lastToolCallId)}
-          title={`${file.tools.join(', ')}${file.hasDiff ? ' · 点击查看差异' : ''}`}
+          onClick={() => onOpen(file.path)}
+          title={`${file.tools.join(', ')}${file.hasDiff ? ' · 点击查看差异' : ' · 点击查看文件'}`}
           style={{ marginLeft: 6, marginTop: 4, fontFamily: 'monospace', fontSize: 12, padding: '1px 6px', borderRadius: 4, cursor: 'pointer', border: `1px solid ${file.isError ? '#efb4b4' : '#cfe3cf'}`, background: file.isError ? '#fff2f0' : '#f2fbf2', color: file.isError ? '#c00' : '#2a7d46' }}
         >
           {file.path}
@@ -96,16 +88,28 @@ export default function Chat({ route, ompRunning }: ChatProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [currentSessionPath, setCurrentSessionPath] = useState('')
   const [showFiles, setShowFiles] = useState(true)
+  const [viewerPath, setViewerPath] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const historyLoaded = useRef(false)
 
   /** Session-cumulative changed files, merged across every turn's summary. */
   const sessionChanged = useMemo(() => {
+    const DIFF_CAP = 200_000
     const merged = new Map<string, ChangedFileInfo>()
     for (const message of messages) {
       for (const file of message.changedFiles ?? []) {
         const prev = merged.get(file.path)
-        merged.set(file.path, prev ? { ...file, tools: [...new Set([...prev.tools, ...file.tools])] } : file)
+        if (!prev) {
+          merged.set(file.path, file)
+          continue
+        }
+        const joined = [prev.diff, file.diff].filter((part): part is string => Boolean(part)).join('\n')
+        merged.set(file.path, {
+          ...file,
+          tools: [...new Set([...prev.tools, ...file.tools])],
+          hasDiff: prev.hasDiff || file.hasDiff,
+          diff: joined ? joined.slice(Math.max(0, joined.length - DIFF_CAP)) : undefined
+        })
       }
     }
     return merged
@@ -311,7 +315,7 @@ export default function Chat({ route, ompRunning }: ChatProps) {
             <strong>{message.role === 'user' ? '你' : '助手'}:</strong>
             <div style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{message.content || (streaming && index === messages.length - 1 && !message.tools?.length ? '…' : '')}</div>
             {message.tools?.map((tool) => <ToolCard key={tool.id} tool={tool} />)}
-            {message.changedFiles && message.changedFiles.length > 0 && <ChangedFilesRow files={message.changedFiles} />}
+            {message.changedFiles && message.changedFiles.length > 0 && <ChangedFilesRow files={message.changedFiles} onOpen={setViewerPath} />}
           </div>
         ))}
       </div>
@@ -337,7 +341,14 @@ export default function Chat({ route, ompRunning }: ChatProps) {
         {ompRunning ? ' · OMP 会话' : ' · 直连模式'}
       </div>
       </div>
-      {ompRunning && showFiles && <FileTree changed={sessionChanged} onJumpToTool={jumpToTool} />}
+      {ompRunning && showFiles && <FileTree changed={sessionChanged} onOpenFile={setViewerPath} />}
+      {viewerPath && (
+        <FileViewer
+          path={viewerPath}
+          diff={sessionChanged.get(viewerPath)?.diff}
+          onClose={() => setViewerPath(null)}
+        />
+      )}
     </div>
   )
 }

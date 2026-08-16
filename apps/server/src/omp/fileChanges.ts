@@ -25,12 +25,19 @@ export interface ChangedFile {
   hasDiff: boolean
   /** True when the latest mutating call on this file ended in error. */
   isError: boolean
+  /** Unified diffs accumulated across this turn's calls, newest-tail capped. */
+  diff?: string
 }
+
+/** Cap per-file accumulated diff text so a runaway turn cannot bloat the SSE
+ *  frame; the newest tail is kept because the latest change matters most. */
+export const MAX_FILE_DIFF_CHARS = 200_000
 
 interface PendingCall {
   name: string
   rawPath: string | null
-  hasDiff: boolean
+  /** Latest diff text streamed on update frames, superseded by the end frame. */
+  diff: string | null
 }
 
 export interface TurnFileState {
@@ -82,23 +89,24 @@ export function toDisplayPath(rawPath: string, workdir: string | null): string {
 export function applyToolEvent(state: TurnFileState, event: ToolEventLike, workdir: string | null): TurnFileState {
   if (event.phase === 'start') {
     const pending = new Map(state.pending)
-    pending.set(event.id, { name: event.name, rawPath: extractToolFilePath(event.args), hasDiff: false })
+    pending.set(event.id, { name: event.name, rawPath: extractToolFilePath(event.args), diff: null })
     return { pending, changes: state.changes }
   }
 
   const known = state.pending.get(event.id)
 
   if (event.phase === 'update') {
-    if (!event.diff || !known || known.hasDiff) return state
+    if (!event.diff || !known) return state
     const pending = new Map(state.pending)
-    pending.set(event.id, { ...known, hasDiff: true })
+    pending.set(event.id, { ...known, diff: event.diff })
     return { pending, changes: state.changes }
   }
 
   const pending = new Map(state.pending)
   pending.delete(event.id)
   const rawPath = known?.rawPath ?? null
-  const hasDiff = Boolean(event.diff) || (known?.hasDiff ?? false)
+  const diffText = event.diff ?? known?.diff ?? null
+  const hasDiff = diffText !== null
   const failed = event.isError === true
   const mutating = hasDiff || isMutatingToolName(event.name)
   if (!known || !mutating || rawPath === null || (failed && !hasDiff)) {
@@ -110,13 +118,18 @@ export function applyToolEvent(state: TurnFileState, event: ToolEventLike, workd
   const tools = existing
     ? existing.tools.includes(event.name) ? existing.tools : [...existing.tools, event.name]
     : [event.name]
+  const mergedDiff = [existing?.diff, diffText].filter((part): part is string => Boolean(part)).join('\n')
+  const cappedDiff = mergedDiff.length > MAX_FILE_DIFF_CHARS
+    ? mergedDiff.slice(mergedDiff.length - MAX_FILE_DIFF_CHARS)
+    : mergedDiff
   const changes = new Map(state.changes)
   changes.set(displayPath, {
     path: displayPath,
     tools,
     lastToolCallId: event.id,
     hasDiff: (existing?.hasDiff ?? false) || hasDiff,
-    isError: failed
+    isError: failed,
+    ...(cappedDiff ? { diff: cappedDiff } : {})
   })
   return { pending, changes }
 }
