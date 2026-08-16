@@ -119,9 +119,11 @@ export default function FileTree({ changed, onOpenFile }: FileTreeProps) {
   const changedList = [...changed.values()]
 
   return (
-    <aside style={{ width: 280, borderLeft: '1px solid #ddd', padding: 12, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', minHeight: 0, background: '#fcfcfc' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <strong style={{ fontSize: 13 }} title={workdir ?? undefined}>工作目录文件</strong>
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 8, boxSizing: 'border-box', background: '#fcfcfc', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+        <span style={{ flex: 1, fontSize: 11, color: '#999', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={workdir ?? undefined}>
+          {workdir ?? ''}
+        </span>
         <button onClick={refreshAll} style={{ fontSize: 12 }}>刷新</button>
       </div>
       {changedList.length > 0 && (
@@ -144,6 +146,6 @@ export default function FileTree({ changed, onOpenFile }: FileTreeProps) {
         <div style={{ fontSize: 12, color: '#888' }}>未设置工作目录。在顶部 OMP 区域选择项目目录后,这里会显示文件列表。</div>
       )}
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>{renderEntries('', 0)}</div>
-    </aside>
+    </div>
   )
 }

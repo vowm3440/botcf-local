@@ -22,8 +22,8 @@ function formatSize(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
-/** Read-only editor drawer: 内容 tab shows the file, 差异 tab shows the
- *  session's unified diff with highlighting. Content refreshes after each turn. */
+/** Read-only editor panel body: 内容 tab shows the file, 差异 tab shows the
+ *  session's inline diff. Content refreshes after each finished turn. */
 export default function FileViewer({ path, diff, onClose }: FileViewerProps) {
   const [tab, setTab] = useState<'content' | 'diff'>(diff ? 'diff' : 'content')
   const [data, setData] = useState<FileData | null>(null)
@@ -69,19 +69,15 @@ export default function FileViewer({ path, diff, onClose }: FileViewerProps) {
   )
 
   return (
-    <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: 'min(760px, 78vw)', background: '#fff', borderLeft: '1px solid #ccc', boxShadow: '-4px 0 16px rgba(0,0,0,0.12)', zIndex: 40, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '10px 12px', borderBottom: '1px solid #eee' }}>
-        <span style={{ fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 13, fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={path}>
-          {path}
-        </span>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: '#fff', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '6px 10px', borderBottom: '1px solid #f0f0f0' }}>
         {tabButton('content', '内容')}
         {diff && tabButton('diff', '差异')}
-        <button onClick={onClose} aria-label="关闭" style={{ fontSize: 14, padding: '2px 10px', border: 'none', background: 'transparent', cursor: 'pointer' }}>✕</button>
-      </div>
-      <div style={{ fontSize: 11, color: '#888', padding: '4px 12px', borderBottom: '1px solid #f3f3f3' }}>
-        {data ? formatSize(data.size) : ''}
-        {data?.truncated ? ' · 文件过大,仅显示前 1 MB' : ''}
-        {tab === 'diff' ? ' · 本会话 OMP 变更差异' : ''}
+        <span style={{ flex: 1, textAlign: 'right', fontSize: 11, color: '#888', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {data ? formatSize(data.size) : ''}
+          {data?.truncated ? ' · 仅显示前 1 MB' : ''}
+          {tab === 'diff' ? ' · 本会话 OMP 变更' : ''}
+        </span>
       </div>
       <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: 8 }}>
         {tab === 'diff' && diff && <DiffView diff={diff} />}

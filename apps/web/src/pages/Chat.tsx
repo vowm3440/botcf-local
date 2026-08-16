@@ -3,6 +3,7 @@ import { RouteInfo, streamChat, api, StreamEvent, SessionSummary, ChangedFileInf
 import DiffView from '../components/DiffView'
 import FileTree from '../components/FileTree'
 import FileViewer from '../components/FileViewer'
+import SplitLayout, { SplitPanelDef } from '../components/SplitLayout'
 
 interface ToolCall {
   id: string
@@ -282,9 +283,8 @@ export default function Chat({ route, ompRunning }: ChatProps) {
     }
   }
 
-  return (
-    <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', maxWidth: 960, width: '100%', margin: '0 auto', padding: 16, boxSizing: 'border-box', minHeight: 0 }}>
+  const chatPanelContent = (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 12, boxSizing: 'border-box', minHeight: 0, overflow: 'hidden' }}>
       <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <span style={{ fontSize: 12, color: '#888', flex: 1 }}>{notice ?? ''}</span>
         {ompRunning && (
@@ -340,15 +340,35 @@ export default function Chat({ route, ompRunning }: ChatProps) {
         {route && <> · {route.apiType} · {route.capabilityLabel}</>}
         {ompRunning ? ' · OMP 会话' : ' · 直连模式'}
       </div>
-      </div>
-      {ompRunning && showFiles && <FileTree changed={sessionChanged} onOpenFile={setViewerPath} />}
-      {viewerPath && (
-        <FileViewer
-          path={viewerPath}
-          diff={sessionChanged.get(viewerPath)?.diff}
-          onClose={() => setViewerPath(null)}
-        />
-      )}
     </div>
   )
+
+  const panels: SplitPanelDef[] = [
+    { id: 'chat', title: ompRunning ? 'OMP 对话' : '对话(直连模式)', minWidth: 360, weight: 3, content: chatPanelContent },
+    ...(ompRunning && showFiles
+      ? [{
+          id: 'files',
+          title: '工作目录文件',
+          minWidth: 200,
+          weight: 1,
+          closable: true,
+          onClose: () => setShowFiles(false),
+          content: <FileTree changed={sessionChanged} onOpenFile={setViewerPath} />
+        }]
+      : []),
+    ...(viewerPath
+      ? [{
+          id: 'editor',
+          title: viewerPath,
+          mono: true,
+          minWidth: 320,
+          weight: 2,
+          closable: true,
+          onClose: () => setViewerPath(null),
+          content: <FileViewer path={viewerPath} diff={sessionChanged.get(viewerPath)?.diff} onClose={() => setViewerPath(null)} />
+        }]
+      : [])
+  ]
+
+  return <SplitLayout storageKey="botcf.layout.v1" panels={panels} />
 }
