@@ -48,6 +48,35 @@ export interface AppStateInfo {
   generationInFlight: boolean
 }
 
+export interface OmpUpdateState {
+  currentVersion: string | null
+  previousVersion: string | null
+  latestUpstream: string | null
+  channel: 'fast' | 'stable' | 'experimental'
+  repo: string | null
+  lastError: string | null
+  lastCheckedAt: number | null
+}
+
+export type OmpUpdatePhase =
+  | 'found'
+  | 'waiting-delay'
+  | 'waiting-idle'
+  | 'downloading'
+  | 'verifying'
+  | 'switched'
+  | 'rolled-back'
+  | 'error'
+
+/** Frame pushed over /api/omp/events while the updater works. */
+export interface OmpUpdateEvent {
+  type: 'omp_update'
+  phase: OmpUpdatePhase
+  version: string | null
+  error?: string
+  state: OmpUpdateState
+}
+
 export interface SessionSummary {
   path: string
   id: string
@@ -172,8 +201,13 @@ export const api = {
         running: boolean
         protocolError: string | null
         workdir: string | null
-        update: { currentVersion: string | null; latestUpstream: string | null; channel: 'fast' | 'stable' | 'experimental'; repo: string | null; lastError: string | null }
+        update: OmpUpdateState
       }>(r)
+    ),
+
+  ompCheckUpdate: () =>
+    fetch('/api/omp/check-update', { method: 'POST' }).then((r) =>
+      json<{ success: boolean; update: OmpUpdateState }>(r)
     ),
 
   setOmpRepo: (repo: string) =>

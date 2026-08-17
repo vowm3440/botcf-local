@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, AppStateInfo, OmpUiRequest } from './api'
+import { api, AppStateInfo, OmpUiRequest, OmpUpdateEvent } from './api'
 import Login from './pages/Login'
 import Chat from './pages/Chat'
 import TopBar from './components/TopBar'
@@ -32,6 +32,14 @@ export default function App() {
     es.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data) as { type?: string; method?: string; id?: string; targetId?: string }
+        if (msg.type === 'omp_update') {
+          const update = msg as unknown as OmpUpdateEvent
+          // TopBar consumes this for instant version/status display.
+          window.dispatchEvent(new CustomEvent('botcf:omp-update', { detail: update }))
+          // Re-sync state.omp (running/available) once the runtime actually changed.
+          if (update.phase === 'switched' || update.phase === 'rolled-back') refresh()
+          return
+        }
         if (msg.type !== 'extension_ui_request') return
         if (msg.method === 'cancel') {
           const target = msg.targetId ?? msg.id
@@ -46,7 +54,7 @@ export default function App() {
       }
     }
     return () => es.close()
-  }, [])
+  }, [refresh])
 
   if (error) {
     return <div style={{ padding: 40, fontFamily: 'sans-serif' }}>本地服务不可用: {error}</div>

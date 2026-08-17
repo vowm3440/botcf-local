@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest'
-import { planSwap, releaseEligible, shouldRollback, normalizeRepoInput, normalizeReleaseSha256, validateReleaseVersion, UpdateState } from '../src/omp/updater.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import crypto from 'node:crypto'
+import { config } from '../src/config.js'
+import { OmpUpdater, OmpUpdateEvent, planSwap, releaseEligible, shouldRollback, normalizeRepoInput, normalizeReleaseSha256, validateReleaseVersion, UpdateState } from '../src/omp/updater.js'
 
 const base: UpdateState = {
   currentVersion: 'v17.2.1',
@@ -88,5 +93,85 @@ describe('release artifact validation', () => {
   it('requires a complete SHA256 digest', () => {
     expect(() => normalizeReleaseSha256(undefined)).toThrow(/SHA256/)
     expect(normalizeReleaseSha256('A'.repeat(64))).toBe('a'.repeat(64))
+  })
+})
+
+describe('OmpUpdater events', () => {
+  let tempDir: string
+  let originalOmpDir: string
+
+  beforeEach(async () => {
+    originalOmpDir = config.ompDir
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'botcf-updater-'))
+    config.ompDir = tempDir
+  })
+
+  afterEach(async () => {
+    config.ompDir = originalOmpDir
+    await fs.rm(tempDir, { recursive: true, force: true })
+  })
+
+  async function createUpdater(healthy = true, idle = true) {
+    let idleCallback: (() => void) | undefined
+    const updater = new OmpUpdater({
+      isIdle: () => idle,
+      onIdleOnce: (callback) => { idleCallback = callback },
+      healthProbe: vi.fn(async () => healthy),
+      log: vi.fn()
+    })
+    await updater.init()
+    const currentDir = path.join(tempDir, 'versions', 'v1')
+    await fs.mkdir(currentDir, { recursive: true })
+    await fs.writeFile(path.join(currentDir, process.platform === 'win32' ? 'omp.exe' : 'omp'), 'old')
+    await updater.swapTo('v1')
+    return { updater, setIdle: (value: boolean) => { idle = value }, fireIdle: () => idleCallback?.() }
+  }
+
+  async function stageRelease(updater: OmpUpdater) {
+    const binary = Buffer.from('new binary')
+    const version = 'v2'
+    const dir = path.join(tempDir, 'versions', version)
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, process.platform === 'win32' ? 'omp.exe' : 'omp'), binary)
+    vi.spyOn(updater, 'fetchLatestRelease').mockResolvedValue({
+      version,
+      publishedAt: 0,
+      assetUrl: 'https://invalid.test/omp',
+      sha256: crypto.createHash('sha256').update(binary).digest('hex')
+    })
+  }
+
+  it('emits found, verifying, and switched for an already downloaded release', async () => {
+    const { updater } = await createUpdater()
+    await stageRelease(updater)
+    const events: OmpUpdateEvent[] = []
+    updater.on('update', (event) => events.push(event))
+    await updater.checkOnce()
+    expect(events.map((event) => event.phase)).toEqual(['found', 'verifying', 'switched'])
+    expect(events.at(-1)?.state.currentVersion).toBe('v2')
+  })
+
+  it('emits rolled-back with the restored state after health failure', async () => {
+    const { updater } = await createUpdater(false)
+    await stageRelease(updater)
+    const events: OmpUpdateEvent[] = []
+    updater.on('update', (event) => events.push(event))
+    await updater.checkOnce()
+    expect(events.map((event) => event.phase)).toEqual(['found', 'verifying', 'rolled-back'])
+    expect(events.at(-1)?.state.currentVersion).toBe('v1')
+  })
+
+  it('retries the pending release immediately when generation becomes idle', async () => {
+    const { updater, setIdle, fireIdle } = await createUpdater(true, false)
+    await stageRelease(updater)
+    const phases: string[] = []
+    updater.on('update', (event: OmpUpdateEvent) => phases.push(event.phase))
+    await updater.checkOnce()
+    expect(phases).toEqual(['found', 'waiting-idle'])
+    setIdle(true)
+    fireIdle()
+    await vi.waitFor(() => expect(updater.getState().currentVersion).toBe('v2'))
+    expect(phases).toEqual(['found', 'waiting-idle', 'found', 'verifying', 'switched'])
+    expect(updater.fetchLatestRelease).toHaveBeenCalledTimes(1)
   })
 })

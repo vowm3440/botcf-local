@@ -1,10 +1,35 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, AppStateInfo, GroupInfo, ModelInfo } from '../api'
+import { api, AppStateInfo, GroupInfo, ModelInfo, OmpUpdateEvent } from '../api'
 import ModelHealthBar from './ModelHealthBar'
 
 interface TopBarProps {
   state: AppStateInfo
   onRouteChanged: () => void
+}
+
+/** Human-readable label for a live updater phase; null hides the activity text. */
+function updateActivityLabel(ev: OmpUpdateEvent): string | null {
+  const v = ev.version ?? ''
+  switch (ev.phase) {
+    case 'found':
+      return v ? `发现新版 ${v}` : null
+    case 'waiting-delay':
+      return `发现 ${v},等待通道延迟窗口`
+    case 'waiting-idle':
+      return `发现 ${v},等待会话空闲后切换`
+    case 'downloading':
+      return `正在下载 ${v}…`
+    case 'verifying':
+      return `正在校验 ${v}…`
+    case 'switched':
+      return `已更新至 ${v}`
+    case 'rolled-back':
+      return `健康检查失败,已回滚至 ${v}`
+    case 'error':
+      return `更新失败: ${ev.error ?? '未知错误'}`
+    default:
+      return null
+  }
 }
 
 export default function TopBar({ state, onRouteChanged }: TopBarProps) {
@@ -25,6 +50,10 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
   const [ompUpstream, setOmpUpstream] = useState<string | null>(null)
   const [ompChannel, setOmpChannel] = useState<'fast' | 'stable' | 'experimental'>('fast')
   const [ompProtoError, setOmpProtoError] = useState<string | null>(null)
+  const [ompActivity, setOmpActivity] = useState<string | null>(null)
+  const [ompLastError, setOmpLastError] = useState<string | null>(null)
+  const [ompCheckedAt, setOmpCheckedAt] = useState<number | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [repoEditing, setRepoEditing] = useState(false)
   const [repoInput, setRepoInput] = useState('')
   const [workdir, setWorkdir] = useState<string | null>(null)
@@ -45,8 +74,30 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
       setOmpUpstream(r.update.latestUpstream)
       setOmpChannel(r.update.channel)
       setOmpProtoError(r.protocolError)
+      setOmpLastError(r.update.lastError)
+      setOmpCheckedAt(r.update.lastCheckedAt)
       setWorkdir(r.workdir)
+      // SSE 断线兜底:轮询发现版本已收敛时清掉可能残留的过程态文案。
+      if (r.update.currentVersion && r.update.currentVersion === r.update.latestUpstream) {
+        setOmpActivity(null)
+      }
     }).catch(() => setOmpVersion(null))
+  }, [])
+
+  // 实时同步:SSE 推送的更新器事件立即反映到状态区,不等 15s 轮询。
+  useEffect(() => {
+    const onUpdate = (ev: Event) => {
+      const detail = (ev as CustomEvent<OmpUpdateEvent>).detail
+      if (!detail?.state) return
+      setOmpVersion(detail.state.currentVersion)
+      setOmpUpstream(detail.state.latestUpstream)
+      setOmpChannel(detail.state.channel)
+      setOmpLastError(detail.state.lastError)
+      setOmpCheckedAt(detail.state.lastCheckedAt)
+      setOmpActivity(updateActivityLabel(detail))
+    }
+    window.addEventListener('botcf:omp-update', onUpdate)
+    return () => window.removeEventListener('botcf:omp-update', onUpdate)
   }, [])
 
   const loadGroups = useCallback(async (refresh = false) => {
@@ -205,7 +256,7 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
             上下文: {state.route.capabilityLabel}
           </span>
         )}
-        <span style={{ color: '#888' }}>
+        <span style={{ color: '#888' }} title={ompCheckedAt ? `上次检查 ${new Date(ompCheckedAt).toLocaleTimeString()}` : undefined}>
           OMP: {state.omp.running
             ? `运行中 ${ompVersion ?? ''}`
             : ompProtoError
@@ -215,6 +266,13 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
                 : ompRepo
                   ? `等待下载 ${ompUpstream ?? '…'}`
                   : '未安装(直连模式)'}
+          {ompActivity && <span style={{ marginLeft: 6, color: '#06c' }}>· {ompActivity}</span>}
+          {!ompActivity && ompUpstream && ompVersion && ompUpstream !== ompVersion && (
+            <span style={{ marginLeft: 6, color: '#c60' }}>· 可更新 {ompUpstream}</span>
+          )}
+          {ompLastError && (
+            <span style={{ marginLeft: 6, color: '#c00' }} title={ompLastError}>· 更新异常</span>
+          )}
           {!state.omp.running && state.omp.available && (
             <button
               style={{ marginLeft: 6 }}
@@ -252,6 +310,25 @@ export default function TopBar({ state, onRouteChanged }: TopBarProps) {
           <option value="stable">稳定通道</option>
           <option value="experimental">实验通道</option>
         </select>
+        {ompRepo && (
+          <button
+            disabled={checkingUpdate}
+            onClick={async () => {
+              setCheckingUpdate(true)
+              try {
+                const r = await api.ompCheckUpdate()
+                setOmpVersion(r.update.currentVersion)
+                setOmpUpstream(r.update.latestUpstream)
+                setOmpLastError(r.update.lastError)
+                setOmpCheckedAt(r.update.lastCheckedAt)
+              } catch (e) {
+                setError(`检查更新失败: ${e instanceof Error ? e.message : String(e)}`)
+              } finally {
+                setCheckingUpdate(false)
+              }
+            }}
+          >{checkingUpdate ? '检查中…' : '检查更新'}</button>
+        )}
         {repoEditing && (
           <span>
             <input

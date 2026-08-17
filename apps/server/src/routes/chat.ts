@@ -386,6 +386,18 @@ export function normalizeAgentMessage(raw: unknown): Array<{ role: 'user' | 'ass
   return []
 }
 
+const idleWaiters = new Set<() => void>()
+
+export function onGenerationIdleOnce(cb: () => void): void {
+  idleWaiters.add(cb)
+}
+
+function notifyGenerationIdle(): void {
+  const callbacks = [...idleWaiters]
+  idleWaiters.clear()
+  for (const callback of callbacks) callback()
+}
+
 export function registerChatRoutes(app: FastifyInstance): void {
   app.post<{ Body: { messages: ChatMessage[] } }>('/api/chat/stream', async (req, reply) => {
     if (!isAuthenticated()) {
@@ -416,6 +428,7 @@ export function registerChatRoutes(app: FastifyInstance): void {
       sseWrite(reply, aborted ? { type: 'aborted' } : { type: 'error', message: redact(err instanceof Error ? err.message : String(err)) })
     } finally {
       appState.generationInFlight = false
+      notifyGenerationIdle()
       appState.currentAbort = null
       reply.raw.end()
     }

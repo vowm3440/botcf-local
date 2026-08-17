@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import fs from 'node:fs'
-import { OmpUpdater, normalizeRepoInput } from '../omp/updater.js'
+import { OmpUpdateEvent, OmpUpdater, normalizeRepoInput } from '../omp/updater.js'
 import { ompClient, ompBinaryPath } from '../omp/rpc.js'
 import { getSecret, putSecret } from '../db.js'
 import { seal, open } from '../secure/store.js'
@@ -46,12 +46,19 @@ export function registerOmpRoutes(app: FastifyInstance, updater: OmpUpdater): vo
         reply.raw.write(`data: ${JSON.stringify(msg)}\n\n`)
       }
     }
+    const forwardUpdate = (event: OmpUpdateEvent): void => {
+      reply.raw.write(`data: ${JSON.stringify({ type: 'omp_update', ...event })}\n\n`)
+    }
     const keepalive = setInterval(() => reply.raw.write(': ping\n\n'), 25_000)
     ompClient.on('event', forward)
-    req.raw.on('close', () => {
+    updater.on('update', forwardUpdate)
+    const cleanup = (): void => {
       clearInterval(keepalive)
       ompClient.off('event', forward)
-    })
+      updater.off('update', forwardUpdate)
+    }
+    req.raw.once('close', cleanup)
+    reply.raw.once('close', cleanup)
   })
 
   /** Answer an extension UI dialog (confirm/select/input/editor). */

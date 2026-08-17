@@ -9,7 +9,7 @@ import { isTrustedLocalRequest } from './secure/localRequest.js'
 import { appState, applyActiveRouteToOmp, restoreBotcfSession, restoreThirdParty, rearmRoute } from './appState.js'
 import { startCredentialProxy } from './proxy/credentialProxy.js'
 import { registerApiRoutes } from './routes/api.js'
-import { registerChatRoutes } from './routes/chat.js'
+import { onGenerationIdleOnce, registerChatRoutes } from './routes/chat.js'
 import { registerFileRoutes } from './routes/files.js'
 import { registerOmpRoutes, restoreWorkdir } from './routes/omp.js'
 import { ompClient } from './omp/rpc.js'
@@ -43,6 +43,7 @@ async function main(): Promise<void> {
 
   const updater = new OmpUpdater({
     isIdle: () => !appState.generationInFlight,
+    onIdleOnce: onGenerationIdleOnce,
     healthProbe: async () => {
       await ompClient.stop()
       if (!ompClient.available) return false

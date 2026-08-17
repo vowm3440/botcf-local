@@ -4,7 +4,17 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { pipeline } from 'node:stream/promises'
 import { request as undiciRequest } from 'undici'
+import { EventEmitter } from 'node:events'
 import { config } from '../config.js'
+
+export type OmpUpdatePhase = 'found' | 'waiting-delay' | 'waiting-idle' | 'downloading' | 'verifying' | 'switched' | 'rolled-back' | 'error'
+
+export interface OmpUpdateEvent {
+  phase: OmpUpdatePhase
+  version: string | null
+  error?: string
+  state: UpdateState
+}
 
 export interface UpdateState {
   currentVersion: string | null
@@ -89,7 +99,7 @@ const versionsDir = () => path.join(config.ompDir, 'versions')
 const currentLink = () => path.join(config.ompDir, 'current')
 const previousLink = () => path.join(config.ompDir, 'previous')
 
-export class OmpUpdater {
+export class OmpUpdater extends EventEmitter {
   private state: UpdateState = {
     currentVersion: null,
     previousVersion: null,
@@ -101,16 +111,28 @@ export class OmpUpdater {
   }
   private consecutiveFailures = 0
   private timer: NodeJS.Timeout | null = null
+  private pendingRelease: ReleaseInfo | null = null
+  private idleRetryRegistered = false
 
   constructor(
     private readonly hooks: {
       /** true only when no generation is in flight — we never swap mid-request. */
       isIdle: () => boolean
+      /** Run once when generation becomes idle. */
+      onIdleOnce: (cb: () => void) => void
       /** probe the runtime after a swap; e.g. RPC handshake. */
       healthProbe: () => Promise<boolean>
       log: (msg: string) => void
     }
-  ) {}
+  ) {
+    super()
+  }
+
+  private emitUpdate(phase: OmpUpdatePhase, version: string | null = null, error?: unknown): void {
+    const event: OmpUpdateEvent = { phase, version, state: this.getState() }
+    if (error !== undefined) event.error = error instanceof Error ? error.message : String(error)
+    this.emit('update', event)
+  }
 
   getState(): UpdateState {
     return { ...this.state }
@@ -191,23 +213,35 @@ export class OmpUpdater {
 
   async checkOnce(): Promise<void> {
     this.state.lastCheckedAt = Date.now()
-    const release = await this.fetchLatestRelease()
+    const release = this.pendingRelease ?? await this.fetchLatestRelease()
+    this.pendingRelease = null
     if (!release) {
       this.state.lastError = '未能获取上游 Release'
       await this.persist()
+      this.emitUpdate('error', null, this.state.lastError)
       return
     }
     this.state.latestUpstream = release.version
     this.state.lastError = null
     await this.persist()
-
     if (release.version === this.state.currentVersion) return
+    this.emitUpdate('found', release.version)
     if (!releaseEligible(release.publishedAt, this.state.channel, Date.now())) {
       this.hooks.log(`发现 ${release.version},等待 ${this.state.channel} 通道延迟窗口`)
+      this.emitUpdate('waiting-delay', release.version)
       return
     }
     if (!this.hooks.isIdle()) {
+      this.pendingRelease = release
       this.hooks.log(`发现 ${release.version},等待会话空闲后切换`)
+      this.emitUpdate('waiting-idle', release.version)
+      if (!this.idleRetryRegistered) {
+        this.idleRetryRegistered = true
+        this.hooks.onIdleOnce(() => {
+          this.idleRetryRegistered = false
+          void this.checkOnce().catch((error) => this.hooks.log(`更新检查失败: ${error instanceof Error ? error.message : String(error)}`))
+        })
+      }
       return
     }
     try {
@@ -215,11 +249,17 @@ export class OmpUpdater {
     } catch (error) {
       this.state.lastError = error instanceof Error ? error.message : String(error)
       await this.persist()
+      this.emitUpdate('error', release.version, error)
       throw error
     }
   }
 
   async installAndSwap(release: ReleaseInfo): Promise<void> {
+    if (!this.hooks.isIdle()) {
+      this.pendingRelease = release
+      this.emitUpdate('waiting-idle', release.version)
+      return
+    }
     const version = validateReleaseVersion(release.version)
     const expectedHash = normalizeReleaseSha256(release.sha256)
     const targetDir = path.join(versionsDir(), version)
@@ -227,21 +267,16 @@ export class OmpUpdater {
     const binPath = path.join(targetDir, binName)
 
     if (!fs.existsSync(binPath)) {
+      this.emitUpdate('downloading', version)
       await fsp.mkdir(targetDir, { recursive: true })
       const tmp = binPath + '.download'
       const res = await undiciRequest(release.assetUrl, { headers: { 'user-agent': 'botcf-local' }, maxRedirections: 5 })
       if (res.statusCode !== 200) throw new Error(`下载失败 HTTP ${res.statusCode}`)
       const hash = crypto.createHash('sha256')
-      await pipeline(
-        res.body,
-        async function* (source) {
-          for await (const chunk of source) {
-            hash.update(chunk as Buffer)
-            yield chunk
-          }
-        },
-        fs.createWriteStream(tmp)
-      )
+      await pipeline(res.body, async function* (source) {
+        for await (const chunk of source) { hash.update(chunk as Buffer); yield chunk }
+      }, fs.createWriteStream(tmp))
+      this.emitUpdate('verifying', version)
       const digest = hash.digest('hex')
       if (digest !== expectedHash) {
         await fsp.rm(tmp, { force: true })
@@ -250,25 +285,22 @@ export class OmpUpdater {
       await fsp.rename(tmp, binPath)
       if (process.platform !== 'win32') await fsp.chmod(binPath, 0o755)
     } else {
+      this.emitUpdate('verifying', version)
       const digest = await sha256File(binPath)
       if (digest !== expectedHash) throw new Error(`已有 OMP 二进制 SHA256 校验失败: 期望 ${expectedHash}, 实际 ${digest}`)
     }
 
+    if (!this.hooks.isIdle()) throw new Error('切换前会话重新变为忙碌')
     await this.swapTo(version)
-
     let healthy = false
-    try {
-      healthy = await this.hooks.healthProbe()
-    } catch (error) {
-      this.state.lastError = `安装后冒烟失败: ${error instanceof Error ? error.message : String(error)}`
-    }
+    try { healthy = await this.hooks.healthProbe() } catch (error) { this.state.lastError = `安装后冒烟失败: ${error instanceof Error ? error.message : String(error)}` }
     if (!healthy) {
       this.state.lastError ??= '安装后冒烟失败'
       this.consecutiveFailures++
       if (shouldRollback(this.consecutiveFailures, 1)) {
         const rolledBack = await this.rollback()
         const restored = rolledBack && await this.hooks.healthProbe().catch(() => false)
-        if (!restored) this.state.lastError = `${this.state.lastError ?? '安装后冒烟失败'}; 旧版本恢复验证失败`
+        if (!restored) this.state.lastError = `${this.state.lastError}; 旧版本恢复验证失败`
         await this.persist()
         return
       }
@@ -276,7 +308,8 @@ export class OmpUpdater {
     this.consecutiveFailures = 0
     this.state.lastError = null
     await this.persist()
-    this.hooks.log(`OMP 已切换到 ${release.version}`)
+    this.emitUpdate('switched', version)
+    this.hooks.log(`OMP 已切换到 ${version}`)
   }
 
   private async relink(link: string, version: string): Promise<void> {
@@ -306,6 +339,7 @@ export class OmpUpdater {
     }
     await this.swapTo(target)
     this.consecutiveFailures = 0
+    this.emitUpdate('rolled-back', target)
     this.hooks.log(`已回滚到 ${target}`)
     return true
   }
@@ -313,5 +347,6 @@ export class OmpUpdater {
   async setChannel(channel: UpdateState['channel']): Promise<void> {
     this.state = { ...this.state, channel }
     await this.persist()
+    this.emitUpdate('found', this.state.latestUpstream)
   }
 }
