@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, AppStateInfo, OmpUiRequest, OmpUpdateEvent } from './api'
 import Login from './pages/Login'
-import Chat from './pages/Chat'
+import Workbench from './pages/Workbench'
 import TopBar from './components/TopBar'
 import UiRequestModal from './components/UiRequestModal'
 
@@ -23,6 +23,22 @@ export default function App() {
     refresh()
   }, [refresh])
 
+  useEffect(() => {
+    if (state || !error) return
+    const timer = window.setTimeout(refresh, 2_000)
+    return () => window.clearTimeout(timer)
+  }, [error, refresh, state])
+
+  // Startup restoration runs after the HTTP server is up, so the first state we
+  // read can carry a not-yet-restored route. The server pushes state_changed
+  // when it finishes; this poll covers the window before the event channel is
+  // connected, and stops as soon as `restoring` clears.
+  useEffect(() => {
+    if (!state?.restoring) return
+    const timer = window.setTimeout(refresh, 1_000)
+    return () => window.clearTimeout(timer)
+  }, [refresh, state])
+
   // Persistent OMP event channel: tool confirmations can arrive at any time.
   // Only dialog methods need user action — setWidget/setStatus/notify/setTitle
   // etc. are one-way display updates and must never open a modal.
@@ -32,6 +48,11 @@ export default function App() {
     es.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data) as { type?: string; method?: string; id?: string; targetId?: string }
+        if (msg.type === 'state_changed') {
+          // Route restored (or definitively failed) on the server side.
+          refresh()
+          return
+        }
         if (msg.type === 'omp_update') {
           const update = msg as unknown as OmpUpdateEvent
           // TopBar consumes this for instant version/status display.
@@ -56,19 +77,24 @@ export default function App() {
     return () => es.close()
   }, [refresh])
 
-  if (error) {
-    return <div style={{ padding: 40, fontFamily: 'sans-serif' }}>本地服务不可用: {error}</div>
+  if (error && !state) {
+    return <div style={{ padding: 40 }}>本地服务暂时不可用: {error}<br />正在自动重试…</div>
   }
   if (!state) {
-    return <div style={{ padding: 40, fontFamily: 'sans-serif' }}>加载中…</div>
+    return <div style={{ padding: 40 }}>加载中…</div>
   }
   if (!state.authenticated) {
     return <Login onLoggedIn={refresh} />
   }
   return (
-    <div style={{ fontFamily: 'sans-serif', height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       <TopBar state={state} onRouteChanged={refresh} />
-      <Chat route={state.route} ompRunning={state.omp.running} />
+      <Workbench
+        route={state.route}
+        ompRunning={state.omp.running}
+        accessMode={state.omp.accessMode}
+        logsAvailable={state.mode === 'botcf'}
+      />
       {uiRequests.length > 0 && (
         <UiRequestModal
           request={uiRequests[0]}

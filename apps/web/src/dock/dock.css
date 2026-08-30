@@ -1,0 +1,381 @@
+/* The states a dock cannot express inline: hover, focus, the middle of a drag.
+ *
+ *  Everything here is either a state selector or a keyframe. Layout and colour that
+ *  do not depend on state stay in the components next to the markup they belong to,
+ *  so there is exactly one place to look for each kind of question. */
+
+/* ------------------------------------------------------------------ the seam */
+
+/* One pixel wide, seven pixels grabbable. The hit area overlaps its neighbours
+   through a pseudo-element, so the grab zone costs the layout nothing. */
+.dock-sash {
+  position: relative;
+  flex: none;
+  align-self: stretch;
+  z-index: 2;
+  background: var(--line);
+  touch-action: none;
+}
+
+.dock-sash[data-axis='x'] {
+  width: var(--sash);
+  cursor: col-resize;
+}
+
+.dock-sash[data-axis='y'] {
+  height: var(--sash);
+  cursor: row-resize;
+}
+
+.dock-sash::before {
+  content: '';
+  position: absolute;
+}
+
+.dock-sash[data-axis='x']::before {
+  inset: 0 calc(-1 * var(--sash-grab));
+}
+
+.dock-sash[data-axis='y']::before {
+  inset: calc(-1 * var(--sash-grab)) 0;
+}
+
+/* The highlight is a separate 3px sliver so the seam thickens visually without
+   ever changing the layout. */
+.dock-sash::after {
+  content: '';
+  position: absolute;
+  background: transparent;
+  transition: background var(--dur-state) var(--ease-out);
+}
+
+.dock-sash[data-axis='x']::after {
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 3px;
+}
+
+.dock-sash[data-axis='y']::after {
+  left: 0;
+  right: 0;
+  top: -1px;
+  height: 3px;
+}
+
+.dock-sash:hover::after,
+.dock-sash:focus-visible::after,
+.dock-sash[data-dragging='true']::after {
+  background: var(--accent);
+}
+
+.dock-sash:focus-visible {
+  outline: none;
+}
+
+/* ------------------------------------------------------------------ tab strip */
+
+/* A tab strip that shows a scrollbar has spent chrome on chrome. */
+.dock-tabs {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.dock-tabs::-webkit-scrollbar {
+  height: 0;
+}
+
+.dock-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  max-width: 220px;
+  height: calc(var(--tabstrip-h) - 9px);
+  margin: 4px 1px;
+  padding: 0 3px 0 8px;
+  border-radius: var(--r1);
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  white-space: nowrap;
+  user-select: none;
+  touch-action: none;
+  cursor: default;
+  transition:
+    background var(--dur-press) var(--ease-out),
+    color var(--dur-press) var(--ease-out),
+    opacity var(--dur-state) var(--ease-out);
+}
+
+.dock-tab:hover {
+  color: var(--ink-2);
+  background: var(--surface-hover);
+}
+
+/* The selected tab is a raised sheet of the content surface — the same trick a
+   physical tab plays, and it needs no accent colour to be unmistakable. */
+.dock-tab[aria-selected='true'] {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 1px 1px rgba(0, 0, 0, 0.03);
+}
+
+/* Alone in its group there is nothing to select between, so the tab stops
+   pretending to be a control and becomes the pane's title. */
+.dock-tab[data-solo='true'] {
+  color: var(--ink-2);
+  font-weight: 600;
+  background: transparent;
+  box-shadow: none;
+  padding-left: 6px;
+}
+
+.dock-tab[data-solo='true']:hover {
+  background: var(--surface-hover);
+}
+
+/* Being dragged: the original stays as a dimmed placeholder, so it is obvious what
+   moves and what stays. */
+.dock-tab[data-lifted='true'] {
+  opacity: 0.32;
+}
+
+.dock-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dock-tab-close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--ink-3);
+  opacity: 0;
+  cursor: pointer;
+  transition:
+    opacity var(--dur-state) var(--ease-out),
+    background var(--dur-press) var(--ease-out);
+}
+
+.dock-tab:hover .dock-tab-close,
+.dock-tab[aria-selected='true'] .dock-tab-close,
+.dock-tab-close:focus-visible {
+  opacity: 1;
+}
+
+.dock-tab-close:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--ink);
+}
+
+/* Where a dragged tab would be inserted. */
+.dock-caret {
+  flex: none;
+  width: 2px;
+  margin: 4px 1px;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: dock-fade-in var(--dur-state) var(--ease-out);
+}
+
+.dock-chrome-action {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  border: none;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color var(--dur-press) var(--ease-out);
+}
+
+.dock-chrome-action:hover {
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------------------- dragging */
+
+/* One indicator for the whole frame, so it travels between drop targets instead of
+   blinking out of one and into the next. Its size is always the size of the
+   outcome. */
+.dock-indicator {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  border-radius: var(--r2);
+  background: var(--accent-wash-strong);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  animation: dock-materialize 160ms var(--ease-out);
+  transition:
+    left var(--dur-move) var(--ease-out),
+    top var(--dur-move) var(--ease-out),
+    width var(--dur-move) var(--ease-out),
+    height var(--dur-move) var(--ease-out),
+    background var(--dur-state) var(--ease-out);
+}
+
+/* Covering a whole pane needs a lighter wash than covering half of one. */
+.dock-indicator[data-tab='true'] {
+  background: var(--accent-wash);
+}
+
+/* The part itself, under the pointer, offset exactly as it was grabbed.
+ *
+ * The one surface in the workbench that genuinely floats over content, so the one
+ * that gets a real material: translucent, blurred, with a lift shadow. Its
+ * transform is written by the drag controller, so nothing here may animate it. */
+.dock-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 40;
+  pointer-events: none;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+  background: var(--chrome);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: var(--shadow-lift);
+  will-change: transform;
+  animation: dock-fade-in var(--dur-press) var(--ease-out);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .dock-ghost {
+    background: var(--chrome-solid);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+/* ----------------------------------------------------------------- the rail */
+
+.dock-rail-item {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 7px 0 6px;
+  border: none;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  line-height: 1;
+  transition:
+    color var(--dur-press) var(--ease-out),
+    background var(--dur-press) var(--ease-out),
+    transform var(--dur-press) var(--ease-out);
+}
+
+.dock-rail-item:hover {
+  color: var(--ink-2);
+  background: var(--surface-hover);
+}
+
+/* Open, but behind another tab: present in ink, without claiming to be the thing
+   you are looking at. */
+.dock-rail-item[data-open='true'] {
+  color: var(--ink-2);
+}
+
+/* Press feedback lands on pointer-down, not on release. */
+.dock-rail-item:active {
+  transform: scale(0.94);
+}
+
+.dock-rail-item[aria-pressed='true'] {
+  color: var(--accent);
+}
+
+.dock-rail-item[aria-pressed='true']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+/* ------------------------------------------------------------- status strip */
+
+.dock-status-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  padding: 0 7px;
+  border: none;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background var(--dur-press) var(--ease-out);
+}
+
+button.dock-status-item {
+  cursor: pointer;
+}
+
+button.dock-status-item:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.dock-status-item[data-tone='alert'] {
+  color: var(--red);
+}
+
+/* ------------------------------------------------------------------ keyframes */
+
+@keyframes dock-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Materialize rather than fade: the surface arrives at size, which reads as a
+   real thing appearing instead of an image being cross-faded in. */
+@keyframes dock-materialize {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dock-rail-item:active {
+    transform: none;
+  }
+
+  .dock-indicator {
+    animation: dock-fade-in var(--dur-state) var(--ease-out);
+  }
+}

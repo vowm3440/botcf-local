@@ -7,15 +7,27 @@ import {
   extractToolFilePath,
   isMutatingToolName,
   listChangedFiles,
-  toDisplayPath,
+  posixDisplayPath,
+  type DisplayPathResolver,
   type ToolEventLike,
   type TurnFileState
 } from '../src/omp/fileChanges.js'
+import { EMPTY_WORKSPACE, addRoot, workspaceDisplayPath } from '../src/workspace/model.js'
 
 const WORKDIR = path.resolve('proj')
 
-function runEvents(events: ToolEventLike[], workdir: string | null = WORKDIR): TurnFileState {
-  return events.reduce((state, event) => applyToolEvent(state, event, workdir), emptyTurnFileState)
+const added = addRoot(EMPTY_WORKSPACE, { path: WORKDIR })
+if (!added.ok) throw new Error(added.error)
+const WORKSPACE = added.workspace
+
+/** Qualified workspace path — the form changed files are recorded under. */
+const q = (relative: string): string => `${added.root.name}/${relative}`
+
+/** The resolver routes/chat.ts binds to the live workspace. */
+const resolve: DisplayPathResolver = (raw) => workspaceDisplayPath(WORKSPACE, raw)
+
+function runEvents(events: ToolEventLike[], resolveDisplayPath: DisplayPathResolver = resolve): TurnFileState {
+  return events.reduce((state, event) => applyToolEvent(state, event, resolveDisplayPath), emptyTurnFileState)
 }
 
 describe('isMutatingToolName', () => {
@@ -58,19 +70,31 @@ describe('extractToolFilePath', () => {
   })
 })
 
-describe('toDisplayPath', () => {
-  it('turns paths inside the workdir into POSIX relative paths', () => {
-    expect(toDisplayPath(path.join(WORKDIR, 'src', 'app.ts'), WORKDIR)).toBe('src/app.ts')
-    expect(toDisplayPath(path.join('src', 'app.ts'), WORKDIR)).toBe('src/app.ts')
+describe('display path resolution', () => {
+  it('records the qualified workspace path the resolver produced', () => {
+    const state = runEvents([
+      { phase: 'start', id: 't1', name: 'edit', args: { path: path.join(WORKDIR, 'src', 'app.ts') } },
+      { phase: 'end', id: 't1', name: 'edit', diff: '+x' }
+    ])
+    expect(listChangedFiles(state)[0]?.path).toBe('proj/src/app.ts')
   })
 
-  it('keeps paths outside the workdir absolute', () => {
+  it('keeps a file outside every root absolute, so the UI can refuse to open it', () => {
     const outside = path.resolve('elsewhere', 'x.ts')
-    expect(toDisplayPath(outside, WORKDIR)).toBe(outside.replace(/\\/g, '/'))
+    const state = runEvents([
+      { phase: 'start', id: 't1', name: 'edit', args: { path: outside } },
+      { phase: 'end', id: 't1', name: 'edit', diff: '+x' }
+    ])
+    expect(listChangedFiles(state)[0]?.path).toBe(outside.replace(/\\/g, '/'))
   })
 
-  it('normalizes separators when no workdir is set', () => {
-    expect(toDisplayPath('src\\deep\\a.ts', null)).toBe('src/deep/a.ts')
+  it('falls back to separator normalization when no resolver is supplied', () => {
+    expect(posixDisplayPath('src\\deep\\a.ts')).toBe('src/deep/a.ts')
+    const state = runEvents([
+      { phase: 'start', id: 't1', name: 'edit', args: { path: 'src\\deep\\a.ts' } },
+      { phase: 'end', id: 't1', name: 'edit', diff: '+x' }
+    ], posixDisplayPath)
+    expect(listChangedFiles(state)[0]?.path).toBe('src/deep/a.ts')
   })
 })
 
@@ -81,7 +105,7 @@ describe('applyToolEvent', () => {
       { phase: 'end', id: 't1', name: 'edit', diff: '-a\n+b' }
     ])
     expect(listChangedFiles(state)).toEqual([
-      { path: 'src/app.ts', tools: ['edit'], lastToolCallId: 't1', hasDiff: true, isError: false, diff: '-a\n+b' }
+      { path: q('src/app.ts'), tools: ['edit'], lastToolCallId: 't1', hasDiff: true, isError: false, diff: '-a\n+b' }
     ])
   })
 
@@ -91,7 +115,7 @@ describe('applyToolEvent', () => {
       { phase: 'end', id: 't1', name: 'write' }
     ])
     expect(listChangedFiles(state)).toEqual([
-      { path: 'notes.md', tools: ['write'], lastToolCallId: 't1', hasDiff: false, isError: false }
+      { path: q('notes.md'), tools: ['write'], lastToolCallId: 't1', hasDiff: false, isError: false }
     ])
   })
 
@@ -111,7 +135,7 @@ describe('applyToolEvent', () => {
       { phase: 'end', id: 't1', name: 'search_replace' }
     ])
     expect(listChangedFiles(state)).toEqual([
-      { path: 'x.ts', tools: ['search_replace'], lastToolCallId: 't1', hasDiff: true, isError: false, diff: '+x\n+y' }
+      { path: q('x.ts'), tools: ['search_replace'], lastToolCallId: 't1', hasDiff: true, isError: false, diff: '+x\n+y' }
     ])
   })
 
@@ -137,7 +161,7 @@ describe('applyToolEvent', () => {
       { phase: 'end', id: 't1', name: 'edit', diff: '+partial', isError: true }
     ])
     expect(listChangedFiles(failedWithDiff)).toEqual([
-      { path: 'a.ts', tools: ['edit'], lastToolCallId: 't1', hasDiff: true, isError: true, diff: '+partial' }
+      { path: q('a.ts'), tools: ['edit'], lastToolCallId: 't1', hasDiff: true, isError: true, diff: '+partial' }
     ])
   })
 
@@ -157,7 +181,7 @@ describe('applyToolEvent', () => {
       { phase: 'end', id: 't2', name: 'edit', diff: '+y' }
     ])
     expect(listChangedFiles(state)).toEqual([
-      { path: 'src/app.ts', tools: ['write', 'edit'], lastToolCallId: 't2', hasDiff: true, isError: false, diff: '+y' }
+      { path: q('src/app.ts'), tools: ['write', 'edit'], lastToolCallId: 't2', hasDiff: true, isError: false, diff: '+y' }
     ])
   })
 
@@ -184,15 +208,41 @@ describe('applyToolEvent', () => {
     expect(diff.endsWith('+tail')).toBe(true)
   })
 
-  it('ignores end frames without a matching start', () => {
+  it('ignores an unmatched end frame that carries no path of its own', () => {
     const state = runEvents([{ phase: 'end', id: 'ghost', name: 'edit', diff: '+x' }])
     expect(listChangedFiles(state)).toEqual([])
+  })
+
+  it('recovers a change when the start frame was missed but the end frame carries args', () => {
+    const state = runEvents([{ phase: 'end', id: 'late', name: 'edit', args: { path: 'src/late.ts' }, diff: '+x' }])
+    expect(listChangedFiles(state)).toEqual([
+      { path: q('src/late.ts'), tools: ['edit'], lastToolCallId: 'late', hasDiff: true, isError: false, diff: '+x' }
+    ])
+  })
+
+  it('falls back to the end frame args when the start frame had no path field', () => {
+    const state = runEvents([
+      { phase: 'start', id: 't1', name: 'apply_patch', args: { patch: '*** Begin Patch' } },
+      { phase: 'end', id: 't1', name: 'apply_patch', args: { file_path: 'src/app.ts' }, diff: '+x' }
+    ])
+    expect(listChangedFiles(state)).toHaveLength(1)
+    expect(listChangedFiles(state)[0]?.path).toBe(q('src/app.ts'))
+  })
+
+  it('keeps update-frame diffs when the start frame was missed', () => {
+    const state = runEvents([
+      { phase: 'update', id: 't1', name: 'search_replace', args: { path: 'x.ts' }, diff: '+x' },
+      { phase: 'end', id: 't1', name: 'search_replace' }
+    ])
+    expect(listChangedFiles(state)).toEqual([
+      { path: q('x.ts'), tools: ['search_replace'], lastToolCallId: 't1', hasDiff: true, isError: false, diff: '+x' }
+    ])
   })
 
   it('never mutates the previous state object', () => {
     const first = runEvents([{ phase: 'start', id: 't1', name: 'edit', args: { path: 'a.ts' } }])
     const before = first.pending.size
-    applyToolEvent(first, { phase: 'end', id: 't1', name: 'edit', diff: '+x' }, WORKDIR)
+    applyToolEvent(first, { phase: 'end', id: 't1', name: 'edit', diff: '+x' }, resolve)
     expect(first.pending.size).toBe(before)
     expect(first.changes.size).toBe(0)
   })

@@ -1,5 +1,3 @@
-import path from 'node:path'
-
 /** Per-turn changed-file tracking, fed by the normalized OMP tool events that
  *  routes/chat.ts already streams to the UI. Pure and immutable so every rule
  *  is unit-testable (OMP tool names and argument fields drift across versions). */
@@ -16,7 +14,8 @@ export interface ToolEventLike {
 }
 
 export interface ChangedFile {
-  /** Workdir-relative POSIX path when inside the workdir, absolute otherwise. */
+  /** Qualified workspace path (`<rootName>/<relative>`) when the file lives in a
+   *  workspace root, absolute POSIX otherwise. */
   path: string
   /** Mutating tool names that touched the file, in first-seen order. */
   tools: string[]
@@ -72,21 +71,22 @@ export function extractToolFilePath(args: unknown): string | null {
   return null
 }
 
-/** Normalize a tool-reported path for display and dedup: resolve against the
- *  workdir, prefer a relative POSIX form, keep out-of-workdir paths absolute. */
-export function toDisplayPath(rawPath: string, workdir: string | null): string {
-  const posix = (p: string): string => p.replace(/\\/g, '/')
-  if (!workdir) return posix(rawPath)
-  const resolved = path.resolve(workdir, rawPath)
-  const rel = path.relative(workdir, resolved)
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return posix(resolved)
-  return posix(rel)
-}
+/** Turns an agent-reported path (absolute, or relative to OMP's cwd) into the
+ *  form the UI browses with. Supplied by the caller — workspace/store.ts binds it
+ *  to the live multi-root workspace — so this module stays free of process state. */
+export type DisplayPathResolver = (rawPath: string) => string
+
+/** Fallback resolver for callers without a workspace: separators only. */
+export const posixDisplayPath: DisplayPathResolver = (rawPath) => rawPath.replace(/\\/g, '/')
 
 /** Fold one normalized tool event into the turn state. A file counts as
  *  changed when its call ends with a diff (strongest signal) or the tool name
  *  is mutating; failed calls only count when they produced a diff. */
-export function applyToolEvent(state: TurnFileState, event: ToolEventLike, workdir: string | null): TurnFileState {
+export function applyToolEvent(
+  state: TurnFileState,
+  event: ToolEventLike,
+  resolveDisplayPath: DisplayPathResolver = posixDisplayPath
+): TurnFileState {
   if (event.phase === 'start') {
     const pending = new Map(state.pending)
     pending.set(event.id, { name: event.name, rawPath: extractToolFilePath(event.args), diff: null })
@@ -96,24 +96,31 @@ export function applyToolEvent(state: TurnFileState, event: ToolEventLike, workd
   const known = state.pending.get(event.id)
 
   if (event.phase === 'update') {
-    if (!event.diff || !known) return state
+    if (!event.diff) return state
     const pending = new Map(state.pending)
-    pending.set(event.id, { ...known, diff: event.diff })
+    // A missed start frame (listener attached mid-turn) must not lose the diff.
+    pending.set(event.id, {
+      name: known?.name ?? event.name,
+      rawPath: known?.rawPath ?? extractToolFilePath(event.args),
+      diff: event.diff
+    })
     return { pending, changes: state.changes }
   }
 
   const pending = new Map(state.pending)
   pending.delete(event.id)
-  const rawPath = known?.rawPath ?? null
+  // Fall back to the end frame's own args when the start frame was missed or
+  // carried no recognizable path field.
+  const rawPath = known?.rawPath ?? extractToolFilePath(event.args)
   const diffText = event.diff ?? known?.diff ?? null
   const hasDiff = diffText !== null
   const failed = event.isError === true
   const mutating = hasDiff || isMutatingToolName(event.name)
-  if (!known || !mutating || rawPath === null || (failed && !hasDiff)) {
+  if (!mutating || rawPath === null || (failed && !hasDiff)) {
     return { pending, changes: state.changes }
   }
 
-  const displayPath = toDisplayPath(rawPath, workdir)
+  const displayPath = resolveDisplayPath(rawPath)
   const existing = state.changes.get(displayPath)
   const tools = existing
     ? existing.tools.includes(event.name) ? existing.tools : [...existing.tools, event.name]

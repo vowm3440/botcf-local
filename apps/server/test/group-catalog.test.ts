@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest'
-import { extractPricingGroups, extractSelfGroups, mergeGroups, modelAllowedInGroup } from '../src/catalog/groupCatalog.js'
+import { afterEach, describe, expect, it } from 'vitest'
+import { BotcfClient } from '../src/botcf/adapter.js'
+import { extractPricingGroups, extractSelfGroups, listUserGroups, mergeGroups, modelAllowedInGroup, resetSiteCatalog } from '../src/catalog/groupCatalog.js'
+
+afterEach(() => resetSiteCatalog())
 
 describe('extractSelfGroups', () => {
   it('reads the New API self-groups map with ratio/desc objects', () => {
@@ -97,5 +100,33 @@ describe('modelAllowedInGroup', () => {
 
   it('returns null for models the catalog does not know', () => {
     expect(modelAllowedInGroup('gemini-3-pro', 'default', catalog)).toBeNull()
+  })
+})
+
+describe('listUserGroups', () => {
+  it('keeps the last successful group snapshot when BotCF discovery fails', async () => {
+    const working = {
+      self: async () => ({ group: 'default' }),
+      listTokens: async () => [{ group: 'codex-plus' }],
+      selfGroups: async () => ({ claude: { desc: 'Claude' } }),
+      pricing: async () => null
+    } as unknown as BotcfClient
+    const failing = {
+      self: async () => { throw new Error('fetch failed') },
+      listTokens: async () => { throw new Error('fetch failed') },
+      selfGroups: async () => null,
+      pricing: async () => null
+    } as unknown as BotcfClient
+
+    expect(await listUserGroups(working, true)).toEqual([
+      { name: 'default' },
+      { name: 'codex-plus' },
+      { name: 'claude', description: 'Claude' }
+    ])
+    expect(await listUserGroups(failing, true)).toEqual([
+      { name: 'default' },
+      { name: 'codex-plus' },
+      { name: 'claude', description: 'Claude' }
+    ])
   })
 })

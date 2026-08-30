@@ -44,7 +44,10 @@ export interface AppStateInfo {
   thirdParty: { baseUrl: string; models: string[] } | null
   user: UserInfo | null
   route: RouteInfo | null
-  omp: { available: boolean; running: boolean }
+  /** Server is still re-arming the saved route after a restart; `route: null`
+   *  is not final while this is true. */
+  restoring?: boolean
+  omp: { available: boolean; running: boolean; accessMode: AccessMode }
   generationInFlight: boolean
 }
 
@@ -102,10 +105,108 @@ export interface FileEntry {
   mtimeMs: number
 }
 
+/** Multi-root workspace ----------------------------------------------------- */
+
+/** One open project directory. `name` is the leading segment of every qualified
+ *  workspace path (`<name>/<relative>`) inside this root. */
+export interface WorkspaceRootInfo {
+  id: string
+  name: string
+  path: string
+  /** False once the directory disappeared; it stays listed so it can be removed. */
+  exists: boolean
+  /** The agent's cwd. Exactly one root is primary while the workspace is open. */
+  primary: boolean
+}
+
+export interface WorkspaceInfo {
+  roots: WorkspaceRootInfo[]
+  primaryId: string | null
+  /** Primary root path — OMP's working directory. */
+  workdir: string | null
+  maxRoots: number
+}
+
+export interface WorkspaceMutation extends WorkspaceInfo {
+  success: boolean
+  root: { id: string; name: string; path: string } | null
+  /** False when the directory was already open (adding is idempotent). */
+  added: boolean
+  /** True when OMP restarted because its cwd (the primary root) changed — and came
+   *  back carrying the active route again. A restart that lost the route is not one. */
+  restarted: boolean
+  /** Why the agent runtime could not be brought back; null when nothing went
+   *  wrong. The workspace change itself applied either way. */
+  runtimeError: string | null
+}
+
+/** Root a file/directory response resolved into; null for the workspace itself. */
+export type PathRoot = { id: string; name: string } | null
+
+/** How the server decoded a previewed file; `binary` means it could not. */
+export type ContentEncoding = 'utf8' | 'utf16le' | 'utf16be' | 'utf32le' | 'utf32be' | 'binary'
+
+/** Live preview ------------------------------------------------------------- */
+
+export type PreviewMode = 'static' | 'command'
+
+export type PreviewPhase = 'stopped' | 'starting' | 'running' | 'error'
+
+export type PreviewReloadKind = 'css' | 'reload'
+
+export interface PreviewState {
+  phase: PreviewPhase
+  mode: PreviewMode | null
+  running: boolean
+  url: string | null
+  port: number | null
+  script: string | null
+  command: string | null
+  workdir: string | null
+  error: string | null
+  startedAt: number | null
+  lastReloadAt: number | null
+  lastReloadKind: PreviewReloadKind | null
+  clients: number
+}
+
+export interface DetectedProject {
+  kind: 'vite' | 'next' | 'node-script' | 'static' | 'empty'
+  mode: PreviewMode
+  script: string | null
+  scripts: string[]
+  packageManager: 'npm' | 'pnpm' | 'yarn' | 'bun'
+  entry: string | null
+  reason: string
+}
+
+export interface PreviewLogLine {
+  at: number
+  line: string
+}
+
+export interface PreviewStatus {
+  success: boolean
+  state: PreviewState
+  detected: DetectedProject | null
+  workdir: string | null
+  /** Root the next start would use (or the one currently hosted). */
+  root: PathRoot
+  roots: WorkspaceRootInfo[]
+  logs: PreviewLogLine[]
+}
+
+/** Frames pushed over /api/preview/events. */
+export type PreviewEvent =
+  | { type: 'preview_state'; state: PreviewState }
+  | { type: 'preview_log'; at: number; line: string }
+  | { type: 'preview_reload'; kind: PreviewReloadKind; paths: string[]; at: number }
+
 export interface ModelHealthCell {
   start: number
   total: number
   failed: number
+  errorRate?: number | null
   state: 'ok' | 'warn' | 'error' | 'idle'
 }
 
@@ -122,16 +223,72 @@ export interface SiteModelHealthInfo {
   model: string
   requests: number
   errors: number
+  successRate: number | null
   errorRate: number | null
   avgTtftSeconds: number | null
   throughputTps: number | null
+  displayErrorThreshold: number
   cells: ModelHealthCell[]
 }
 
 export interface SiteHealthMeta {
   generatedAt: number
   bucketMs: number
-  errorThreshold: number | null
+  bucketCount: number
+  errorThreshold: number
+  refreshMs: number
+  group: string
+}
+
+export interface LogQuery {
+  page?: number
+  pageSize?: number
+  tokenName?: string
+  modelName?: string
+  group?: string
+  startTs?: number
+  endTs?: number
+}
+
+export interface UsageLogItem {
+  id: number
+  type: number
+  created_at: number
+  model_name: string
+  token_name: string
+  group: string
+  quota: number
+  quotaUsd: number
+  prompt_tokens: number
+  completion_tokens: number
+  use_time: number
+  is_stream: boolean
+}
+
+export interface LogsResponse {
+  success: boolean
+  items: UsageLogItem[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+function logSearchParams(query: LogQuery): URLSearchParams {
+  const params = new URLSearchParams()
+  if (query.page !== undefined) params.set('page', String(query.page))
+  if (query.pageSize !== undefined) params.set('pageSize', String(query.pageSize))
+  if (query.tokenName) params.set('tokenName', query.tokenName)
+  if (query.modelName) params.set('modelName', query.modelName)
+  if (query.group) params.set('group', query.group)
+  if (query.startTs !== undefined) params.set('startTs', String(query.startTs))
+  if (query.endTs !== undefined) params.set('endTs', String(query.endTs))
+  return params
+}
+
+export function logsExportUrl(query: LogQuery, format: 'csv' | 'json'): string {
+  const params = logSearchParams(query)
+  params.set('format', format)
+  return `/api/logs/export?${params}`
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -191,6 +348,11 @@ export const api = {
       }>(r)
     ),
 
+  logs: (query: LogQuery) => {
+    const params = logSearchParams(query)
+    return fetch(`/api/logs?${params}`).then((r) => json<LogsResponse>(r))
+  },
+
   abort: () => fetch('/api/chat/abort', { method: 'POST' }).then((r) => json<{ success: boolean }>(r)),
 
   ompStatus: () =>
@@ -200,10 +362,19 @@ export const api = {
         available: boolean
         running: boolean
         protocolError: string | null
+        accessMode: AccessMode
         workdir: string | null
+        workspace: { roots: WorkspaceRootInfo[]; primaryId: string | null; maxRoots: number }
         update: OmpUpdateState
       }>(r)
     ),
+
+  setAccessMode: (accessMode: AccessMode) =>
+    fetch('/api/omp/access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accessMode })
+    }).then((r) => json<{ success: boolean; accessMode: AccessMode }>(r)),
 
   ompCheckUpdate: () =>
     fetch('/api/omp/check-update', { method: 'POST' }).then((r) =>
@@ -236,22 +407,65 @@ export const api = {
       body: JSON.stringify(payload)
     }).then((r) => json<{ success: boolean }>(r)),
 
+  /** Opens `path` as a workspace root *and* makes it the primary one (OMP's cwd);
+   *  other open roots are kept. The endpoint predates multi-root support. */
   setWorkdir: (path: string) =>
     fetch('/api/omp/workdir', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path })
-    }).then((r) => json<{ success: boolean; workdir: string; restarted: boolean }>(r)),
+    }).then((r) => json<WorkspaceMutation>(r)),
 
-  files: (relPath: string) =>
-    fetch(`/api/omp/files?path=${encodeURIComponent(relPath)}`).then((r) =>
-      json<{ success: boolean; workdir: string | null; path: string; entries: FileEntry[]; truncated: boolean }>(r)
+  workspace: () => fetch('/api/workspace').then((r) => json<WorkspaceInfo & { success: boolean }>(r)),
+
+  addWorkspaceRoot: (payload: { path: string; name?: string; primary?: boolean }) =>
+    fetch('/api/workspace/roots', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then((r) => json<WorkspaceMutation>(r)),
+
+  removeWorkspaceRoot: (id: string) =>
+    fetch('/api/workspace/roots/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    }).then((r) => json<WorkspaceMutation>(r)),
+
+  /** Move the agent's working directory to another open root (restarts OMP). */
+  setPrimaryRoot: (id: string) =>
+    fetch('/api/workspace/primary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    }).then((r) => json<WorkspaceMutation>(r)),
+
+  /** Directory listing for a qualified workspace path; '' lists the roots. */
+  files: (workspacePath: string) =>
+    fetch(`/api/omp/files?path=${encodeURIComponent(workspacePath)}`).then((r) =>
+      json<{
+        success: boolean
+        workdir: string | null
+        roots: WorkspaceRootInfo[]
+        maxRoots: number
+        path: string
+        root: PathRoot
+        entries: FileEntry[]
+        truncated: boolean
+      }>(r)
     ),
 
-  fileContent: (relPath: string) =>
-    fetch(`/api/omp/file?path=${encodeURIComponent(relPath)}`).then((r) =>
-      json<{ success: boolean; path: string; size: number; mtimeMs: number; content: string; truncated: boolean; binary: boolean }>(r)
+  fileContent: (workspacePath: string) =>
+    fetch(`/api/omp/file?path=${encodeURIComponent(workspacePath)}`).then((r) =>
+      json<{ success: boolean; path: string; root: PathRoot; size: number; mtimeMs: number; content: string; truncated: boolean; binary: boolean; encoding: ContentEncoding }>(r)
     ),
+
+  saveFile: (payload: { path: string; content: string; baseMtimeMs?: number }) =>
+    fetch('/api/omp/file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then((r) => json<{ success: boolean; path: string; root: PathRoot; size: number; mtimeMs: number }>(r)),
 
   history: () =>
     fetch('/api/chat/history').then((r) =>
@@ -277,7 +491,23 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message })
-    }).then((r) => json<{ success: boolean }>(r))
+    }).then((r) => json<{ success: boolean }>(r)),
+
+  previewStatus: (root?: string): Promise<PreviewStatus> =>
+    fetch(`/api/preview/status${root ? `?root=${encodeURIComponent(root)}` : ''}`).then((r) => json<PreviewStatus>(r)),
+
+  previewStart: (payload: { mode?: PreviewMode; script?: string; root?: string }) =>
+    fetch('/api/preview/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then((r) => json<{ success: boolean; state: PreviewState; root: PathRoot; logs: PreviewLogLine[] }>(r)),
+
+  previewStop: () =>
+    fetch('/api/preview/stop', { method: 'POST' }).then((r) => json<{ success: boolean; state: PreviewState }>(r)),
+
+  previewReload: () =>
+    fetch('/api/preview/reload', { method: 'POST' }).then((r) => json<{ success: boolean; state: PreviewState }>(r))
 }
 
 export interface OmpUiRequest {
@@ -291,9 +521,15 @@ export interface OmpUiRequest {
   timeout?: number
 }
 
+/** Tool-approval mode. `ask` shows OMP's confirm dialogs; `full` answers them
+ *  automatically so a run never pauses. It does not widen what tools may do. */
+export type AccessMode = 'ask' | 'full'
+
 export interface StreamEvent {
-  type: 'delta' | 'usage' | 'done' | 'error' | 'aborted' | 'context' | 'tool' | 'files_changed'
+  type: 'delta' | 'reasoning' | 'notice' | 'usage' | 'done' | 'error' | 'aborted' | 'context' | 'tool' | 'files_changed'
   text?: string
+  /** `notice` severity — chrome about the run, not model prose. */
+  level?: 'info' | 'warn'
   inputTokens?: number
   outputTokens?: number
   tokens?: number

@@ -3,9 +3,10 @@
 // 开发模式:用系统 Node 跑 apps/server/dist/server.js。
 // 打包模式:服务端已被 esbuild 打成单文件、无原生依赖,直接用 Electron 内嵌
 // Node(ELECTRON_RUN_AS_NODE)运行,最终用户无需安装 Node.js。
-const { app, BrowserWindow, dialog } = require('electron')
+const { app, BrowserWindow, dialog, session } = require('electron')
 const { spawn } = require('node:child_process')
 const path = require('node:path')
+const fs = require('node:fs')
 const http = require('node:http')
 
 const PORT = 7788
@@ -14,7 +15,24 @@ const SERVER_URL = `http://127.0.0.1:${PORT}`
 let serverProc = null
 let mainWindow = null
 
-function startServer() {
+async function resolveSystemProxyEnv() {
+  if (process.env.HTTPS_PROXY || process.env.https_proxy) return {}
+  try {
+    const rules = await session.defaultSession.resolveProxy('https://api.github.com')
+    const proxyRule = rules
+      .split(';')
+      .map((rule) => rule.trim())
+      .find((rule) => /^(?:PROXY|HTTPS)\s+/i.test(rule))
+    if (!proxyRule) return {}
+    const endpoint = proxyRule.replace(/^(?:PROXY|HTTPS)\s+/i, '')
+    const proxyUrl = endpoint.includes('://') ? endpoint : `http://${endpoint}`
+    return { HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl }
+  } catch {
+    return {}
+  }
+}
+
+function startServer(networkEnv = {}) {
   const packaged = app.isPackaged
   const entry = packaged
     ? path.join(process.resourcesPath, 'server', 'server.bundle.cjs')
@@ -28,7 +46,8 @@ function startServer() {
     HOST: '127.0.0.1',
     PORT: String(PORT),
     BOTCF_DATA_DIR: path.join(app.getPath('userData'), 'data'),
-    WEB_DIST_DIR: webDist
+    WEB_DIST_DIR: webDist,
+    ...networkEnv
   }
 
   let command
@@ -72,10 +91,17 @@ function waitForHealth(retries = 50) {
 }
 
 function createWindow() {
+  // Packaged builds take the icon from the exe's resources; `electron .` during
+  // development has none, so point it at the same file the build embeds.
+  const devIcon = path.join(__dirname, 'build', 'icon.ico')
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 820,
-    title: 'BotCF 本地控制台',
+    ...(app.isPackaged || !fs.existsSync(devIcon) ? {} : { icon: devIcon }),
+    // The build identifies itself: a portable copy and an installed one look the
+    // same in the taskbar, and "which version am I looking at" should not require
+    // opening a settings panel.
+    title: `BotCF 本地控制台 v${app.getVersion()}`,
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
@@ -84,6 +110,12 @@ function createWindow() {
     }
   })
   mainWindow.loadURL(SERVER_URL)
+  // The page owns its own title, so keep it and append the build's version rather
+  // than letting the document overwrite it on load.
+  mainWindow.on('page-title-updated', (event, title) => {
+    event.preventDefault()
+    mainWindow?.setTitle(`${title} v${app.getVersion()}`)
+  })
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
@@ -99,7 +131,7 @@ if (!gotLock) {
   })
 
   app.whenReady().then(async () => {
-    startServer()
+    startServer(await resolveSystemProxyEnv())
     try {
       await waitForHealth()
     } catch (err) {

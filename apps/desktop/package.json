@@ -1,13 +1,14 @@
 {
   "name": "botcf-desktop",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "description": "BotCF 本地控制台桌面版",
   "author": "botcf-local",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win"
+    "icon": "node build/generate-icon.mjs",
+    "dist": "node build/dist.mjs"
   },
   "devDependencies": {
     "electron": "^43.4.0",
@@ -35,16 +36,29 @@
       }
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        },
         {
           "target": "nsis",
           "arch": ["x64"]
         }
       ]
     },
+    "portable": {
+      "artifactName": "BotCF-Local-v${version}-portable.${ext}",
+      "requestExecutionLevel": "user"
+    },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "artifactName": "BotCF-Local-v${version}-Setup.${ext}"
     }
   }
 }

@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { resolveDeclared, compactionThreshold, botcfDocumentedContext, officialDocumentedContext, FALLBACK_CONTEXT } from '../src/catalog/capability.js'
+import {
+  resolveDeclared,
+  compactionThreshold,
+  botcfDocumentedContext,
+  officialDocumentedContext,
+  officialMaxOutput,
+  resolveMaxOutput,
+  DEFAULT_MAX_OUTPUT,
+  MIN_MAX_OUTPUT,
+  FALLBACK_CONTEXT
+} from '../src/catalog/capability.js'
 
 describe('resolveDeclared', () => {
   it('an explicit BotCF route value wins outright (plan rule 1)', () => {
@@ -84,5 +94,62 @@ describe('officialDocumentedContext', () => {
 
   it('unknown families stay undefined (fallback path)', () => {
     expect(officialDocumentedContext('mystery-model')).toBeUndefined()
+  })
+})
+
+describe('officialMaxOutput', () => {
+  it('covers the families whose output budget is published', () => {
+    expect(officialMaxOutput('gpt-3.5-turbo-16k')).toBe(4_096)
+    expect(officialMaxOutput('gpt-4o-mini')).toBe(16_384)
+    expect(officialMaxOutput('gpt-4.1')).toBe(32_768)
+    expect(officialMaxOutput('gpt-5.2-codex')).toBe(128_000)
+    expect(officialMaxOutput('o3-mini-high')).toBe(100_000)
+    expect(officialMaxOutput('claude-opus-5')).toBe(64_000)
+    expect(officialMaxOutput('gemini-3.5-flash')).toBe(65_536)
+  })
+
+  it('unknown families stay undefined so the default applies', () => {
+    expect(officialMaxOutput('kimi-k3')).toBeUndefined()
+    expect(officialMaxOutput('minimax-m3')).toBeUndefined()
+  })
+})
+
+/** The regression this guards: every route used to get a flat 8192-token output
+ *  budget. A reasoning model spends that budget thinking *before* it emits a tool
+ *  call, so the turn came back with stopReason "length" — no text, no tool call —
+ *  and the agent loop ended looking like the assistant had simply stopped after
+ *  reading a file. */
+describe('resolveMaxOutput', () => {
+  it('gives a reasoning model far more than the old flat 8K cap', () => {
+    expect(resolveMaxOutput('claude-opus-5', 200_000)).toBeGreaterThan(8_192)
+    expect(resolveMaxOutput('gpt-5.2-codex', 400_000)).toBeGreaterThan(8_192)
+    expect(resolveMaxOutput('kimi-k3', 128_000)).toBeGreaterThan(8_192)
+  })
+
+  it('never lets output claim more than a quarter of the window', () => {
+    // 64K is documented for claude, but a 200K window only affords 50K.
+    expect(resolveMaxOutput('claude-opus-5', 200_000)).toBe(50_000)
+    expect(resolveMaxOutput('gpt-5.2-codex', 400_000)).toBe(100_000)
+    expect(resolveMaxOutput('mystery-model', 128_000)).toBe(32_000)
+  })
+
+  it('keeps a documented family value when the window can afford more', () => {
+    expect(resolveMaxOutput('claude-opus-5', 1_000_000)).toBe(64_000)
+    expect(resolveMaxOutput('gemini-3.5-flash', 1_000_000)).toBe(65_536)
+    expect(resolveMaxOutput('mystery-model', 1_000_000)).toBe(DEFAULT_MAX_OUTPUT)
+  })
+
+  it('honours a small documented budget even when the window is large', () => {
+    expect(resolveMaxOutput('gpt-3.5-turbo', 128_000)).toBe(4_096)
+    expect(resolveMaxOutput('gpt-4o', 128_000)).toBe(16_384)
+  })
+
+  it('floors the window share at the historical cap for tiny windows', () => {
+    expect(resolveMaxOutput('mystery-model', 16_000)).toBe(MIN_MAX_OUTPUT)
+  })
+
+  it('leaves a workable input budget after compaction reserves', () => {
+    const output = resolveMaxOutput('claude-opus-5', 200_000)
+    expect(compactionThreshold(200_000, output)).toBeGreaterThan(100_000)
   })
 })

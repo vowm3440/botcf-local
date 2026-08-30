@@ -6,7 +6,7 @@ import { resetSiteStatus } from './catalog/siteStatus.js'
 import { setActiveRoute } from './proxy/credentialProxy.js'
 import { getSecret, putSecret, deleteSecret } from './db.js'
 import { seal, open } from './secure/store.js'
-import { ompClient, syncBotcfModelsConfig } from './omp/rpc.js'
+import { ompClient, syncBotcfModelsConfig, type OmpState } from './omp/rpc.js'
 
 export interface ActiveRouteInfo {
   group: string
@@ -31,6 +31,11 @@ export const appState = {
   botcf: new BotcfClient(),
   thirdParty: null as ThirdPartyInfo | null,
   route: null as ActiveRouteInfo | null,
+  /** True while startup restoration (workspace → OMP → route) is still running.
+   *  The HTTP server is already accepting requests at that point, so the first
+   *  `/api/state` a page reads can legitimately carry `route: null`; the flag
+   *  tells the client that answer is not final yet. */
+  restoring: false,
   generationInFlight: false,
   currentAbort: null as AbortController | null,
   /** Cumulative OMP session token counters, for per-turn deltas. */
@@ -107,27 +112,43 @@ export function persistRoute(): void {
   if (appState.route) putSecret(ROUTE_SECRET, seal(JSON.stringify(appState.route)))
 }
 
+/** What applying a route needs of the agent runtime. `OmpRpcClient` satisfies it;
+ *  naming it lets a test drive the real RPC wire against a scripted OMP process
+ *  instead of stubbing the step this function exists to perform. */
+export interface RouteTarget {
+  readonly running: boolean
+  stop: () => Promise<void>
+  start: () => Promise<boolean>
+  handshake: () => Promise<boolean>
+  setModel: (provider: string, modelId: string) => Promise<unknown>
+  setThinkingLevel: (level: string) => Promise<unknown>
+  getState: () => Promise<OmpState>
+}
+
 /** Apply the active BotCF route to OMP. Session switches and process restarts
  *  can restore OMP's persisted model, so every such boundary must reassert the
  *  proxy-backed provider/model pair. */
-export async function applyActiveRouteToOmp(): Promise<boolean> {
+export async function applyActiveRouteToOmp(
+  client: RouteTarget = ompClient,
+  syncModelsConfig: () => boolean = syncBotcfModelsConfig
+): Promise<boolean> {
   const route = appState.route
   if (!route) return false
-  const configChanged = syncBotcfModelsConfig()
-  if (configChanged && ompClient.running) {
-    await ompClient.stop()
-    const started = await ompClient.start()
-    if (!started || !await ompClient.handshake()) return false
+  const configChanged = syncModelsConfig()
+  if (configChanged && client.running) {
+    await client.stop()
+    const started = await client.start()
+    if (!started || !await client.handshake()) return false
   }
-  if (!ompClient.running) return false
+  if (!client.running) return false
   const provider = route.apiType === 'responses'
     ? 'botcf-responses'
     : route.apiType === 'messages'
       ? 'botcf-messages'
       : 'botcf-chat'
-  await ompClient.setModel(provider, route.modelId)
-  if (route.thinkingLevel) await ompClient.setThinkingLevel(route.thinkingLevel)
-  const state = await ompClient.getState()
+  await client.setModel(provider, route.modelId)
+  if (route.thinkingLevel) await client.setThinkingLevel(route.thinkingLevel)
+  const state = await client.getState()
   if (state.model && (state.model.provider !== provider || state.model.id !== route.modelId)) {
     throw new Error(`OMP 状态校验失败: 期望 ${provider}/${route.modelId}, 实际 ${String(state.model.provider)}/${String(state.model.id)}`)
   }

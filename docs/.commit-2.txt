@@ -1,0 +1,47 @@
+test: real-browser harness and workbench E2E
+
+CodeMirror in jsdom measures every element as zero pixels, so its viewport logic
+degrades and a component test there passes without testing the component. What
+was missing was not an assertion library, it was a real browser — and the perf
+gate already opens one. harness/app.cjs extracts its bootstrap (build check,
+server on a scratch port and data directory, session, workspace root, window,
+stage tracking, cleanup); e2e/ reuses it to assert instead of to measure.
+
+The diff those checks need arrives the way the app's own diffs arrive: as one
+finished turn's `files_changed` over the real chat stream. harness/inject.js
+replaces `fetch` for `/api/chat/stream` alone, for the duration of one send, and
+answers it with real SSE bytes; the message is typed into the real composer and
+sent with a real Enter. Everything downstream of those bytes is the application.
+Nothing in apps/web knows this exists — a seam built for tests would keep
+passing after a refactor, and this will not.
+
+15 checks: three decoration kinds landing on the correct line *text*, decorations
+leaving and returning with the viewport, gutter bars and what clicking one does,
+removed lines shown in place, 「显示全文」 expanding while still windowing (1,079
+→ 3,721 rows modelled, 152 in the DOM either way), the >1 MiB read-only surface
+refusing input, undo clearing the dirty marker — plus the Git panel and the
+diagnostics centre, reachable because their state has an honest source (a git
+repository on disk; the endpoint the sandboxed preview page already posts to)
+and needing no product change at all.
+
+The review panel is deliberately absent: its state is written only by a real
+agent turn, and faking one means a route that exists for tests. A stub OMP is
+the right answer to that, and it is its own piece of work.
+
+On its first run this suite found the data-loss bug fixed in the previous
+commit — one the perf gate had been driving past at full speed, because it only
+ever asks how fast something is.
+
+harness/tempDir.cjs also fixes a hang the suite found in itself: the fixture is a
+git repository, git writes `.git/objects` read-only, `rmSync` came back EPERM,
+and the rejection escaped cleanup so `app.exit` never ran — a run that reported
+15/15 and then had to be killed by hand. `force: true` covers "path does not
+exist", not permissions. Removal is now one retrying helper used by both the
+setup and the teardown of both harnesses, and it never rejects.
+
+And `loadApp` now clears browser storage between the first load and a second one,
+for both harnesses. The window's origin is fixed, so localStorage carries the
+dock arrangement and the open tabs from one run to the next: the rail is a
+toggle, so a run that ended with the Git panel in front made the next run's click
+close it, and leftover tabs would have meant the gate sampling a baseline for a
+workbench that was not empty. A run must not depend on how the last one ended.

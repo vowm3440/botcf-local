@@ -24,6 +24,13 @@ function migrate(d: DatabaseSync): void {
       updated_at INTEGER NOT NULL
     );
 
+    -- Plain (non-secret) local preferences, e.g. the tool-approval mode.
+    CREATE TABLE IF NOT EXISTS app_settings (
+      name TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS model_capabilities (
       route_key TEXT PRIMARY KEY,          -- "<group>|<model>|<api_type>"
       model_id TEXT NOT NULL,
@@ -32,6 +39,8 @@ function migrate(d: DatabaseSync): void {
       declared_context INTEGER,
       verified_context INTEGER,
       effective_context INTEGER NOT NULL,
+      -- Always written explicitly by ensureCapability/refreshMaxOutputs (which
+      -- size it per model family); this column default only covers hand-written SQL.
       max_output INTEGER NOT NULL DEFAULT 8192,
       source TEXT NOT NULL,                -- botcf-docs | official-docs | omp-catalog | measured
       confidence TEXT NOT NULL,            -- verified | documented | inferred
@@ -72,4 +81,15 @@ export function getSecret(name: string): string | null {
 
 export function deleteSecret(name: string): void {
   getDb().prepare('DELETE FROM secrets WHERE name = ?').run(name)
+}
+
+export function putSetting(name: string, value: string): void {
+  getDb()
+    .prepare('INSERT INTO app_settings(name, value, updated_at) VALUES(?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
+    .run(name, value, Date.now())
+}
+
+export function getSetting(name: string): string | null {
+  const row = getDb().prepare('SELECT value FROM app_settings WHERE name = ?').get(name) as unknown as { value: string } | undefined
+  return row?.value ?? null
 }

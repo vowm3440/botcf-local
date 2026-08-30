@@ -1,3 +1,4 @@
+import { fetch as undiciFetch } from 'undici'
 import { config } from '../config.js'
 import { redact } from '../secure/redact.js'
 
@@ -37,6 +38,24 @@ export interface BotcfLogItem {
   is_stream: boolean
 }
 
+export interface LogQuery {
+  page: number
+  pageSize: number
+  tokenName?: string
+  modelName?: string
+  group?: string
+  startTs?: number
+  endTs?: number
+}
+
+export interface LogPage {
+  items: BotcfLogItem[]
+  total: number
+}
+
+const MAX_LOG_PAGES = 100
+const MAX_LOG_ITEMS = 10_000
+
 export interface CreateTokenOptions {
   name: string
   group: string
@@ -55,6 +74,22 @@ interface ApiEnvelope<T> {
   success: boolean
   message: string
   data: T
+}
+
+/** Proxy-aware fetch for all BotCF upstream calls. Node's built-in fetch
+ *  ignores both HTTP(S)_PROXY and the undici global dispatcher configured in
+ *  server.ts, so a machine that reaches botcf.com only through a system proxy
+ *  failed every login with a bare "fetch failed". The npm undici fetch honors
+ *  the EnvHttpProxyAgent, and network failures surface their real cause. */
+async function botcfFetch(url: string, init?: Parameters<typeof undiciFetch>[1]): Promise<Awaited<ReturnType<typeof undiciFetch>>> {
+  try {
+    return await undiciFetch(url, init)
+  } catch (error) {
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause : null
+    const code = (cause as NodeJS.ErrnoException | null)?.code
+    const message = cause?.message ?? (error instanceof Error ? error.message : String(error))
+    throw new BotcfError(`无法连接 BotCF: ${[code, message].filter(Boolean).join(' ')}`)
+  }
 }
 
 /** Thin client for BotCF's New API management endpoints, verified against the
@@ -96,7 +131,7 @@ export class BotcfClient {
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(config.botcfBaseUrl + path, {
+    const res = await botcfFetch(config.botcfBaseUrl + path, {
       method,
       headers: this.headers(),
       body: body === undefined ? undefined : JSON.stringify(body)
@@ -202,46 +237,73 @@ export class BotcfClient {
   }
 
   /** GET /api/log/self — per-request log entries (tokens, model, quota cost). */
-  async logs(page = 0, pageSize = 20): Promise<{ items: BotcfLogItem[]; total: number }> {
-    const data = await this.request<{ items?: BotcfLogItem[]; total?: number }>(
-      'GET',
-      `/api/log/self?p=${page}&page_size=${pageSize}&type=0`
-    )
+  async logs(query: LogQuery): Promise<LogPage> {
+    const params = new URLSearchParams({
+      p: String(query.page),
+      page_size: String(query.pageSize),
+      type: '0'
+    })
+    if (query.tokenName) params.set('token_name', query.tokenName)
+    if (query.modelName) params.set('model_name', query.modelName)
+    if (query.group) params.set('group', query.group)
+    if (query.startTs !== undefined) params.set('start_timestamp', String(query.startTs))
+    if (query.endTs !== undefined) params.set('end_timestamp', String(query.endTs))
+
+    const data = await this.request<{ items?: BotcfLogItem[]; total?: number }>('GET', `/api/log/self?${params}`)
     return { items: data.items ?? [], total: data.total ?? 0 }
   }
 
-  /** Raw GET for status-endpoint shape discovery. Callers pass fixed
-   *  candidate paths only (never user input); null on any failure. */
-  async fetchStatusCandidate(path: string): Promise<unknown | null> {
-    try {
-      const res = await fetch(config.botcfBaseUrl + path, { headers: this.headers() })
-      if (!res.ok) return null
-      return await res.json()
-    } catch {
-      return null
+  /** Aggregate paged logs for filtering/export, bounded to avoid accidental
+   *  unbounded reads when an upstream total is missing or inaccurate. */
+  async fetchAllLogs(query: LogQuery, maxPages = MAX_LOG_PAGES): Promise<LogPage> {
+    const pageLimit = Math.max(1, Math.min(Math.trunc(maxPages), MAX_LOG_PAGES))
+    const pageSize = Math.max(1, Math.min(Math.trunc(query.pageSize), 100))
+    const firstPage = Math.max(0, Math.trunc(query.page))
+    const items: BotcfLogItem[] = []
+    let total = 0
+
+    for (let offset = 0; offset < pageLimit && items.length < MAX_LOG_ITEMS; offset++) {
+      const page = await this.logs({ ...query, page: firstPage + offset, pageSize })
+      if (offset === 0) total = page.total
+
+      const remaining = MAX_LOG_ITEMS - items.length
+      items.push(...page.items.slice(0, remaining))
+
+      if (page.items.length === 0) break
+      if (page.items.length < pageSize) break
+      if (page.total > 0 && items.length >= page.total) break
     }
+
+    return { items, total }
   }
 
-  /** Status fetch with header variants: '/api/models/status' rejects access
-   *  tokens ("权限不足") but serves the browser's session cookie, so the
-   *  cookie-only variant goes first. Rejected envelopes (success:false) are
-   *  treated as misses so discovery can move on. */
-  async fetchSiteStatus(path: string): Promise<unknown | null> {
-    const base: Record<string, string> = {
-      'Content-Type': 'application/json',
+  /** Header variants for the pricing page's status request. The first variant
+   *  mirrors the website script (browser UA, /pricing referer, credentials),
+   *  while the normal API headers remain as a compatibility fallback. */
+  siteHeaderVariants(): Array<{ name: string; headers: Record<string, string> }> {
+    const browserHeaders: Record<string, string> = {
       Accept: 'application/json',
-      'User-Agent': 'botcf-local/0.1'
+      'Cache-Control': 'no-cache',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+      Referer: config.botcfBaseUrl + '/pricing'
     }
-    const variants: Array<Record<string, string>> = []
-    if (this.sessionCookie) {
-      const cookieOnly: Record<string, string> = { ...base, Cookie: this.sessionCookie }
-      if (this.userId !== null) cookieOnly['New-Api-User'] = String(this.userId)
-      variants.push(cookieOnly)
-    }
-    variants.push(this.headers())
-    for (const headers of variants) {
+    if (this.sessionCookie) browserHeaders.Cookie = this.sessionCookie
+    if (this.accessToken) browserHeaders.Authorization = `Bearer ${this.accessToken}`
+    if (this.userId !== null) browserHeaders['New-Api-User'] = String(this.userId)
+
+    const variants: Array<{ name: string; headers: Record<string, string> }> = [
+      { name: 'pricing-browser', headers: browserHeaders }
+    ]
+    variants.push({ name: 'token', headers: this.headers() })
+    return variants
+  }
+
+  /** Status fetch across header variants. Rejected envelopes (success:false)
+   *  are treated as misses so discovery can move on. */
+  async fetchSiteStatus(path: string): Promise<unknown | null> {
+    for (const { headers } of this.siteHeaderVariants()) {
       try {
-        const res = await fetch(config.botcfBaseUrl + path, { headers })
+        const res = await botcfFetch(config.botcfBaseUrl + path, { headers })
         if (!res.ok) continue
         const payload = (await res.json()) as { success?: boolean } | null
         if (payload && typeof payload === 'object' && payload.success === false) continue
@@ -251,6 +313,24 @@ export class BotcfClient {
       }
     }
     return null
+  }
+
+  /** Diagnostic probe: raw HTTP status + body preview per header variant, so a
+   *  human can see exactly what the site serves this client at each path. */
+  async probeSiteStatus(path: string): Promise<Array<{ variant: string; httpStatus: number | null; payload: unknown | null; preview: string }>> {
+    const results: Array<{ variant: string; httpStatus: number | null; payload: unknown | null; preview: string }> = []
+    for (const { name, headers } of this.siteHeaderVariants()) {
+      try {
+        const res = await botcfFetch(config.botcfBaseUrl + path, { headers })
+        const text = await res.text()
+        let payload: unknown | null = null
+        try { payload = JSON.parse(text) } catch { /* HTML challenge page etc. */ }
+        results.push({ variant: name, httpStatus: res.status, payload, preview: text.slice(0, 800) })
+      } catch (error) {
+        results.push({ variant: name, httpStatus: null, payload: null, preview: `请求失败: ${error instanceof Error ? error.message : String(error)}` })
+      }
+    }
+    return results
   }
 
   /** GET /api/user/self/groups — the console's own key-creation group picker
@@ -271,7 +351,7 @@ export class BotcfClient {
    *  Never throws — group discovery must degrade gracefully without pricing. */
   async pricing(): Promise<unknown | null> {
     try {
-      const res = await fetch(config.botcfBaseUrl + '/api/pricing', { headers: this.headers() })
+      const res = await botcfFetch(config.botcfBaseUrl + '/api/pricing', { headers: this.headers() })
       if (!res.ok) return null
       const payload = (await res.json()) as { success?: boolean } | null
       if (payload && typeof payload === 'object' && payload.success === false) return null

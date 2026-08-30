@@ -1,13 +1,15 @@
 import { FastifyInstance } from 'fastify'
+import { Readable } from 'node:stream'
 import { appState, applyActiveRouteToOmp, persistBotcfSession, clearBotcfSession, persistRoute, isAuthenticated, setThirdParty, getThirdPartyKey } from '../appState.js'
-import { BotcfError } from '../botcf/adapter.js'
+import { BotcfError, BotcfLogItem, LogQuery } from '../botcf/adapter.js'
 import { ensureDedicatedKey, discoverGroups } from '../botcf/keys.js'
 import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup, normalizeBaseUrl, parseModelList, thirdPartyApiType, THIRD_PARTY_GROUP, THIRD_PARTY_THINKING_LEVELS } from '../catalog/routing.js'
 import { extractPricingGroups, extractSelfGroups, getSiteCatalog, listUserGroups, mergeGroups, modelAllowedInGroup } from '../catalog/groupCatalog.js'
 import { getModelHealth } from '../catalog/modelHealth.js'
-import { getSiteStatus } from '../catalog/siteStatus.js'
+import { getSiteStatus, extractSiteStatus, siteModelStatus, siteStatusDiagnostics, SITE_STATUS_CANDIDATE_PATHS } from '../catalog/siteStatus.js'
 import { ensureCapability, capabilityLabel, compactionThreshold, routeKey } from '../catalog/capability.js'
 import { setActiveRoute } from '../proxy/credentialProxy.js'
+import { getAccessMode } from '../omp/access.js'
 import { ompClient } from '../omp/rpc.js'
 import { getDb } from '../db.js'
 import { redact } from '../secure/redact.js'
@@ -40,6 +42,150 @@ function sanitizeUser(u: { id: number; username: string; display_name: string; g
     usedQuotaUsd: u.used_quota / qpu,
     requestCount: u.request_count
   }
+}
+
+interface LogsQuerystring {
+  page?: string
+  pageSize?: string
+  page_size?: string
+  p?: string
+  tokenName?: string
+  token_name?: string
+  modelName?: string
+  model_name?: string
+  group?: string
+  startTs?: string
+  start_timestamp?: string
+  endTs?: string
+  end_timestamp?: string
+  format?: string
+}
+
+interface LogResponseItem extends BotcfLogItem {
+  quotaUsd: number
+}
+
+const LOG_FETCH_PAGE_SIZE = 100
+const LOG_FETCH_MAX_PAGES = 100
+
+function badRequest(message: string): never {
+  const error = new Error(message) as Error & { statusCode: number }
+  error.statusCode = 400
+  throw error
+}
+
+function queryValue(query: LogsQuerystring, camel: keyof LogsQuerystring, snake: keyof LogsQuerystring): string | undefined {
+  const value = query[camel] ?? query[snake]
+  return typeof value === 'string' ? value : undefined
+}
+
+function parseInteger(value: string | undefined, name: string, fallback: number, min: number, max: number): number {
+  if (value === undefined || value === '') return fallback
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    badRequest(`${name} 必须是 ${min} 到 ${max} 之间的整数`)
+  }
+  return parsed
+}
+
+function parseTimestamp(value: string | undefined, name: string): number | undefined {
+  if (value === undefined || value === '') return undefined
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) badRequest(`${name} 必须是非负数字时间戳`)
+  return parsed
+}
+
+function parseLogsQuery(query: LogsQuerystring): LogQuery {
+  const parsed: LogQuery = {
+    page: parseInteger(queryValue(query, 'page', 'p'), 'page', 0, 0, 1_000_000),
+    pageSize: parseInteger(queryValue(query, 'pageSize', 'page_size'), 'pageSize', 20, 1, 100)
+  }
+  const tokenName = queryValue(query, 'tokenName', 'token_name')?.trim()
+  const modelName = queryValue(query, 'modelName', 'model_name')?.trim()
+  const group = query.group?.trim()
+  if (tokenName) parsed.tokenName = tokenName
+  if (modelName) parsed.modelName = modelName
+  if (group) parsed.group = group
+  parsed.startTs = parseTimestamp(queryValue(query, 'startTs', 'start_timestamp'), 'startTs')
+  parsed.endTs = parseTimestamp(queryValue(query, 'endTs', 'end_timestamp'), 'endTs')
+  if (parsed.startTs !== undefined && parsed.endTs !== undefined && parsed.startTs > parsed.endTs) {
+    badRequest('startTs 不能晚于 endTs')
+  }
+  return parsed
+}
+
+function includesFolded(value: string, search: string | undefined): boolean {
+  return !search || value.toLocaleLowerCase().includes(search.toLocaleLowerCase())
+}
+
+function filterLogs(items: BotcfLogItem[], query: LogQuery): BotcfLogItem[] {
+  return items.filter((item) => (
+    item.type === 2
+    && includesFolded(item.token_name ?? '', query.tokenName)
+    && includesFolded(item.model_name ?? '', query.modelName)
+    && (!query.group || (item.group ?? '').toLocaleLowerCase() === query.group.toLocaleLowerCase())
+    && (query.startTs === undefined || item.created_at >= query.startTs)
+    && (query.endTs === undefined || item.created_at <= query.endTs)
+  ))
+}
+
+async function loadFilteredLogs(query: LogQuery): Promise<BotcfLogItem[]> {
+  // Strategy B: upstream filtering is unverified, so fetch bounded raw pages
+  // and apply every filter locally for deterministic behavior.
+  const result = await appState.botcf.fetchAllLogs({ page: 0, pageSize: LOG_FETCH_PAGE_SIZE }, LOG_FETCH_MAX_PAGES)
+  return filterLogs(result.items, query)
+}
+
+function responseItem(item: BotcfLogItem, quotaUnit: number): LogResponseItem {
+  return { ...item, quotaUsd: item.quota / quotaUnit }
+}
+
+function csvField(value: string | number | boolean): string {
+  const text = String(value)
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+function csvRow(item: BotcfLogItem, quotaUnit: number): string {
+  return [
+    new Date(item.created_at * 1000).toISOString(),
+    item.group,
+    item.token_name,
+    item.model_name,
+    item.prompt_tokens,
+    item.completion_tokens,
+    item.quota,
+    item.quota / quotaUnit,
+    item.use_time,
+    item.is_stream
+  ].map(csvField).join(',') + '\r\n'
+}
+
+function exportRange(query: LogQuery): string {
+  const date = (timestamp: number) => new Date(timestamp * 1000).toISOString().slice(0, 10)
+  if (query.startTs !== undefined && query.endTs !== undefined) return `${date(query.startTs)}-to-${date(query.endTs)}`
+  if (query.startTs !== undefined) return `from-${date(query.startTs)}`
+  if (query.endTs !== undefined) return `to-${date(query.endTs)}`
+  return 'all'
+}
+
+function csvStream(items: BotcfLogItem[], quotaUnit: number): Readable {
+  function* chunks() {
+    yield '\ufeff'
+    yield '时间,分组,令牌,模型,prompt_tokens,completion_tokens,quota,折算 USD,耗时(秒),是否流式\r\n'
+    for (const item of items) yield csvRow(item, quotaUnit)
+  }
+  return Readable.from(chunks())
+}
+
+function jsonStream(items: LogResponseItem[]): Readable {
+  function* chunks() {
+    yield '[\n'
+    for (let index = 0; index < items.length; index++) {
+      yield `${index === 0 ? '' : ',\n'}${JSON.stringify(items[index])}`
+    }
+    yield '\n]\n'
+  }
+  return Readable.from(chunks())
 }
 
 export function registerApiRoutes(app: FastifyInstance): void {
@@ -96,7 +242,10 @@ export function registerApiRoutes(app: FastifyInstance): void {
   app.get('/api/state', async () => {
     let user = null
     if (appState.botcf.authenticated) {
-      user = sanitizeUser(await appState.botcf.self(), await getQuotaPerUnit())
+      // Local control-plane state must stay available when BotCF is briefly
+      // unreachable. Account details can refresh later through /api/usage.
+      const upstreamUser = await appState.botcf.self().catch(() => null)
+      if (upstreamUser) user = sanitizeUser(upstreamUser, await getQuotaPerUnit())
     }
     return {
       success: true,
@@ -105,7 +254,9 @@ export function registerApiRoutes(app: FastifyInstance): void {
       thirdParty: appState.thirdParty,
       user,
       route: appState.route,
-      omp: { available: ompClient.available, running: ompClient.running },
+      // Startup restoration may still be in flight; see appState.restoring.
+      restoring: appState.restoring,
+      omp: { available: ompClient.available, running: ompClient.running, accessMode: getAccessMode() },
       generationInFlight: appState.generationInFlight
     }
   })
@@ -306,7 +457,7 @@ export function registerApiRoutes(app: FastifyInstance): void {
       appState.botcf.self(),
       appState.botcf.usageStat(),
       getQuotaPerUnit(),
-      appState.botcf.logs(0, 10).catch(() => ({ items: [], total: 0 }))
+      appState.botcf.logs({ page: 0, pageSize: 10 }).catch(() => ({ items: [], total: 0 }))
     ])
     const recentRequests = logs.items
       .filter((i) => i.type === 2)
@@ -336,7 +487,36 @@ export function registerApiRoutes(app: FastifyInstance): void {
     }
   })
 
-  app.get('/api/logs', async () => ({ success: true, logs: await appState.botcf.logs(0, 20) }))
+  app.get<{ Querystring: LogsQuerystring }>('/api/logs', async (req) => {
+    const query = parseLogsQuery(req.query)
+    const [filtered, quotaUnit] = await Promise.all([loadFilteredLogs(query), getQuotaPerUnit()])
+    const start = query.page * query.pageSize
+    return {
+      success: true,
+      items: filtered.slice(start, start + query.pageSize).map((item) => responseItem(item, quotaUnit)),
+      total: filtered.length,
+      page: query.page,
+      pageSize: query.pageSize
+    }
+  })
+
+  app.get<{ Querystring: LogsQuerystring }>('/api/logs/export', async (req, reply) => {
+    const query = parseLogsQuery(req.query)
+    const format = (req.query.format ?? '').toLocaleLowerCase()
+    if (format !== 'csv' && format !== 'json') badRequest('format 必须是 csv 或 json')
+
+    const [items, quotaUnit] = await Promise.all([loadFilteredLogs(query), getQuotaPerUnit()])
+    const range = exportRange(query)
+    reply.header('Content-Disposition', `attachment; filename="botcf-logs-${range}.${format}"`)
+
+    if (format === 'csv') {
+      reply.type('text/csv; charset=utf-8')
+      return reply.send(csvStream(items, quotaUnit))
+    }
+
+    reply.type('application/json; charset=utf-8')
+    return reply.send(jsonStream(items.map((item) => responseItem(item, quotaUnit))))
+  })
 
   /** Uptime-style cells + fault rate for one route: the site's own model
    *  status (as on botcf.com/pricing) when reachable, plus the credential
@@ -345,24 +525,49 @@ export function registerApiRoutes(app: FastifyInstance): void {
     const group = req.query.group ?? ''
     const model = req.query.model ?? ''
     if (!group || !model) return reply.code(400).send({ success: false, error: '缺少 group 或 model' })
-    const { status: site } = await getSiteStatus(appState.botcf)
-    const siteModel = site?.models.find((m) => m.model.toLowerCase() === model.toLowerCase()) ?? null
+    const { status: site } = await getSiteStatus(appState.botcf, group)
+    const siteModel = site ? siteModelStatus(site, model) : null
     return {
       success: true,
       health: getModelHealth(group, model),
       site: siteModel,
-      siteMeta: site ? { generatedAt: site.generatedAt, bucketMs: site.bucketMs, errorThreshold: site.errorThreshold } : null
+      siteMeta: site ? {
+        generatedAt: site.generatedAt,
+        bucketMs: site.bucketMs,
+        bucketCount: site.bucketCount,
+        errorThreshold: site.errorThreshold,
+        refreshMs: site.refreshMs,
+        group: site.group
+      } : null
     }
   })
 
-  /** Shape discovery for the site's own status source (pending live contract):
-   *  probe every plausible New API-family status path in one shot. */
-  app.get('/api/model-health/debug', async () => {
-    const candidates = ['/api/uptime/status', '/api/status/models', '/api/model_status', '/api/models/status', '/api/monitor/status']
-    const probes = await Promise.all(candidates.map(async (path) => {
-      const raw = await appState.botcf.fetchStatusCandidate(path)
-      return { path, available: raw !== null, preview: raw === null ? null : JSON.stringify(raw).slice(0, 1500) }
+  /** Site-status diagnostics: probe every candidate path with every auth
+   *  variant, run the extractor on each payload, and expose discovery state.
+   *  Open http://127.0.0.1:7788/api/model-health/debug in a browser; append
+   *  ?path=/api/xxx to probe one extra path (e.g. one found in DevTools). */
+  app.get<{ Querystring: { path?: string } }>('/api/model-health/debug', async (req, reply) => {
+    const extra = (req.query.path ?? '').trim()
+    if (extra && (!/^\/(?:api\/[A-Za-z0-9/_.?&=-]*|botcf-pricing-group-order-admin\?[A-Za-z0-9_?&=%.-]*)$/.test(extra) || extra.includes('..'))) {
+      return reply.code(400).send({ success: false, error: 'path 必须是允许的 BotCF 站内状态路径' })
+    }
+    const paths = extra ? [extra, ...SITE_STATUS_CANDIDATE_PATHS.filter((p) => p !== extra)] : [...SITE_STATUS_CANDIDATE_PATHS]
+    const probes = await Promise.all(paths.map(async (path) => {
+      const variants = await appState.botcf.probeSiteStatus(path)
+      return {
+        path,
+        variants: variants.map(({ variant, httpStatus, payload, preview }) => {
+          const extracted = payload === null ? null : extractSiteStatus(payload)
+          return {
+            variant,
+            httpStatus,
+            isJson: payload !== null,
+            extractedModels: extracted ? extracted.models.length : 0,
+            preview
+          }
+        })
+      }
     }))
-    return { success: true, probes }
+    return { success: true, discovery: siteStatusDiagnostics(), probes }
   })
 }

@@ -1,0 +1,47 @@
+feat: v3 workbench, CodeMirror editor, and the 8 × 1 MB perf gate
+
+Dock-based workbench: a rail, a dock and a status strip, with the editor, file
+tree, git, review, diagnostics, terminal, preview and assistant all dockable
+parts. Where a feature lives is the dock's business; what a feature *is* stays
+in the page, and `renderPart` is the whole seam between them.
+
+The text surface is CodeMirror 6 rather than a textarea. The gate measured why:
+with one 948 KB / 12,001 line file mounted the renderer sat ~400 MiB over an
+empty workbench while the JS heap never passed ~45 MiB, so almost all of it was
+Blink holding layout, line boxes and shaping caches for lines nobody could see.
+A textarea owns its whole value by definition and cannot be windowed from
+outside, so the component itself had to go. Windowing the line-number gutter
+first is what produced the number that justified the swap rather than an
+assumption: ~345 rows instead of 12,001 returned only ~41 MiB of ~357, because
+layout cost tracks characters, not lines.
+
+perf/ is the gate that keeps it honest: eight ~1 MB files opened as dirty tabs
+in the real app, driven through the real components in a real window, judged
+against perf/thresholds.json, non-zero on any limit exceeded. Every wait has a
+ceiling — two early runs sat at "driving the editor…" forever with no result
+file, and a measurement harness that can hang cannot prove anything.
+
+It now carries a second load: the inline diff view over 350 changed regions per
+file, delivered as one finished turn's `files_changed`, plus a ninth fixture
+file small enough to reach the 「显示全文」 branch. Their memory is accounted
+apart from the eight tabs' — "what eight big dirty tabs cost" and "what a
+3,000-row diff view costs" are different claims, and one peak would let either
+hide the other's regression.
+
+fix: a file the assistant changed opens in the inline view, which mounts no
+editor, so `isDirty` read '' from the absent surface, marked every such file
+unsaved, and cached an *empty draft* for it. Reopening the tab then seeded the
+editor with nothing, and one save would have written that to disk. `readText`
+now distinguishes "no live buffer" from "an empty one", and `cacheNow` refuses
+to write when no editor is mounted.
+
+Thresholds re-derived from seven runs and grouped by measured spread. Row counts
+and paint are precise; the four memory limits are coarse guards — the same phase
+measured 59.7 and 101.8 MiB committed across identical runs, which is why
+`jsHeapCommittedPeakMiB <= 100` failed three of five on unchanged code. The
+seventh run then set new maxima on four lines at once, also on unchanged code,
+and passed all of them: headroom is sized to the observed spread rather than
+trimmed to the observed maximum, and every range is recorded in the notes so the
+next person can see which lines are meaningful at what resolution. `--gc-marks`
+adds the stabler measurement as a separate run, because a major GC between
+phases would trade the latency numbers for the memory ones.

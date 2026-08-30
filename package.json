@@ -1,6 +1,6 @@
 {
   "name": "botcf-local",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "workspaces": [
     "apps/server",
@@ -14,7 +14,9 @@
     "dev:web": "npm run dev -w apps/web",
     "desktop": "npm run build && npm run start -w apps/desktop",
     "dist:desktop": "npm run build && npm run bundle -w apps/server && npm run dist -w apps/desktop",
-    "test": "npm run test -w apps/server",
+    "test": "npm run test -w apps/server && npm run test -w apps/web",
+    "test:e2e": "npm run build && electron e2e/editor.cjs",
+    "perf:editor": "npm run build && electron perf/editor-load.cjs",
     "start": "npm run start -w apps/server"
   },
   "engines": {

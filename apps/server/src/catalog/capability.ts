@@ -22,7 +22,17 @@ export interface DeclaredSources {
 }
 
 export const FALLBACK_CONTEXT = 128_000
-export const DEFAULT_MAX_OUTPUT = 8_192
+/** Output budget for a model no family rule recognises. Reasoning models spend
+ *  this budget on thinking *before* they emit a tool call, so a cap sized for
+ *  chat replies (8K) truncates an agent turn mid-thought: the message comes back
+ *  with `stopReason: "length"`, no text and no tool call, and the agent loop ends
+ *  looking like the assistant simply stopped. */
+export const DEFAULT_MAX_OUTPUT = 32_768
+/** Never go below the historical cap, however small the window. */
+export const MIN_MAX_OUTPUT = 8_192
+/** Output may claim at most this share of the window — the rest has to stay
+ *  available for the transcript that prompted it. */
+export const MAX_OUTPUT_WINDOW_SHARE = 0.25
 export const TOOL_CALL_RESERVE = 16_000
 
 export function routeKey(group: string, modelId: string, apiType: ApiType): string {
@@ -83,6 +93,34 @@ export function officialDocumentedContext(modelId: string): number | undefined {
   return undefined
 }
 
+/** Published max-output budgets by family, same conservative spirit as
+ *  `officialDocumentedContext`. Undefined means "no family rule", which resolves
+ *  to `DEFAULT_MAX_OUTPUT`. */
+export function officialMaxOutput(modelId: string): number | undefined {
+  const id = modelId.toLowerCase()
+  if (id.startsWith('gpt-3.5')) return 4_096
+  if (id.startsWith('gpt-4o')) return 16_384
+  if (id.startsWith('gpt-4')) return 32_768
+  if (id.startsWith('gpt-5') || id.startsWith('codex')) return 128_000
+  if (/^o[134]/.test(id)) return 100_000
+  if (id.startsWith('claude')) return 64_000
+  if (id.startsWith('gemini')) return 65_536
+  return undefined
+}
+
+/** The output cap handed to OMP and to direct requests.
+ *
+ *  Two bounds meet here. A reasoning model needs enough room to think *and* then
+ *  call a tool, so the floor matters; but output is carved out of the same window
+ *  as the transcript, so a 128K budget on a 128K model would leave nothing to
+ *  prompt with. The window share is the binding constraint on small models, the
+ *  documented family value on large ones. */
+export function resolveMaxOutput(modelId: string, effectiveContext: number): number {
+  const documented = officialMaxOutput(modelId) ?? DEFAULT_MAX_OUTPUT
+  const share = Math.max(MIN_MAX_OUTPUT, Math.floor(effectiveContext * MAX_OUTPUT_WINDOW_SHARE))
+  return Math.min(documented, share)
+}
+
 export function getCapability(key: string): CapabilityRow | null {
   return ((getDb().prepare('SELECT * FROM model_capabilities WHERE route_key = ?').get(key) as unknown as CapabilityRow | undefined) ?? null)
 }
@@ -104,7 +142,7 @@ export function ensureCapability(group: string, modelId: string, apiType: ApiTyp
     declared_context: resolved.source === 'fallback' ? null : resolved.value,
     verified_context: null,
     effective_context: resolved.value,
-    max_output: DEFAULT_MAX_OUTPUT,
+    max_output: resolveMaxOutput(modelId, resolved.value),
     source: resolved.source,
     confidence: resolved.confidence,
     last_checked_at: null
@@ -126,17 +164,40 @@ export function markVerified(key: string, verifiedContext: number): void {
     .run(verifiedContext, verifiedContext, Date.now(), key)
 }
 
+/** Recompute every stored output cap from the current family rules.
+ *
+ *  `max_output` is derived, never measured, so recomputing it is safe and
+ *  idempotent — and necessary: routes created before the cap was family-aware
+ *  carry a persisted 8192 that `ensureCapability` would keep returning forever.
+ *  Returns how many rows changed. */
+export function refreshMaxOutputs(): number {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT route_key, model_id, effective_context, max_output FROM model_capabilities')
+    .all() as unknown as Array<Pick<CapabilityRow, 'route_key' | 'model_id' | 'effective_context' | 'max_output'>>
+  const update = db.prepare('UPDATE model_capabilities SET max_output = ? WHERE route_key = ?')
+  let changed = 0
+  for (const row of rows) {
+    const next = resolveMaxOutput(row.model_id, row.effective_context)
+    if (next === row.max_output) continue
+    update.run(next, row.route_key)
+    changed++
+  }
+  return changed
+}
+
 /** Upstream rejected the request for exceeding max context: downgrade the route.
- *  If the error told us the real limit, use it; otherwise back off by 20%. */
+ *  If the error told us the real limit, use it; otherwise back off by 20%.
+ *  The output cap rides along, so it never outgrows the shrunken window. */
 export function recordContextError(key: string, upstreamLimit?: number): number {
   const row = getCapability(key)
   if (!row) return FALLBACK_CONTEXT
   const next = Math.max(8_000, upstreamLimit ?? Math.floor(row.effective_context * 0.8))
   getDb()
     .prepare(`UPDATE model_capabilities
-      SET effective_context = ?, verified_context = ?, source = 'measured', confidence = 'verified', last_checked_at = ?
+      SET effective_context = ?, verified_context = ?, max_output = ?, source = 'measured', confidence = 'verified', last_checked_at = ?
       WHERE route_key = ?`)
-    .run(next, next, Date.now(), key)
+    .run(next, next, resolveMaxOutput(row.model_id, next), Date.now(), key)
   return next
 }
 

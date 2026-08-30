@@ -121,6 +121,7 @@ export function extractSelfGroups(payload: unknown): SelfGroupsCatalog {
 const CATALOG_TTL_MS = 5 * 60_000
 let cachedCatalog: PricingCatalog | null = null
 let cachedAt = 0
+let cachedUserGroups: UserGroup[] = []
 
 /** TTL-cached site catalog: /api/user/self/groups (the console's own group
  *  picker source) merged with /api/pricing. A failed or empty fetch keeps the
@@ -147,6 +148,7 @@ export async function getSiteCatalog(client: BotcfClient, force = false): Promis
 export function resetSiteCatalog(): void {
   cachedCatalog = null
   cachedAt = 0
+  cachedUserGroups = []
 }
 
 export interface UserGroup {
@@ -156,9 +158,19 @@ export interface UserGroup {
 
 /** Default group + key-referenced groups + site-visible groups, deduped. */
 export async function listUserGroups(client: BotcfClient, force = false): Promise<UserGroup[]> {
-  const [base, catalog] = await Promise.all([discoverGroups(client), getSiteCatalog(client, force)])
-  return mergeGroups(base, catalog.groups).map((name) => {
-    const description = catalog.descriptions[name]
+  const [discovered, catalog] = await Promise.all([
+    discoverGroups(client).catch(() => null),
+    getSiteCatalog(client, force)
+  ])
+  const previousNames = cachedUserGroups.map(({ name }) => name)
+  const base = discovered ?? previousNames
+  const previousDescriptions = Object.fromEntries(
+    cachedUserGroups.flatMap(({ name, description }) => description ? [[name, description]] : [])
+  )
+  const groups = mergeGroups(base, catalog.groups).map((name) => {
+    const description = catalog.descriptions[name] ?? previousDescriptions[name]
     return description ? { name, description } : { name }
   })
+  if (groups.length > 0) cachedUserGroups = groups
+  return groups.length > 0 ? groups : cachedUserGroups
 }

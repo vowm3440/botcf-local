@@ -7,15 +7,24 @@ services:
     # Loopback only — never exposed to LAN or WAN.
     ports:
       - "127.0.0.1:7788:7788"
+      # 实时预览需要固定端口才能被宿主浏览器访问(默认随机端口只在容器内可用):
+      # 取消下面两行的注释,并把 PREVIEW_PORT 设为同一个端口。
+      # - "127.0.0.1:7790:7790"
     environment:
       - HOST=0.0.0.0
       - BOTCF_DATA_DIR=/data
-      # - OMP_GITHUB_REPO=owner/repo   # enable OMP runtime auto-update
+      # OMP 的 native addon 解压目录必须在可写卷里(根文件系统只读)。
+      - HOME=/data/home
+      # - PREVIEW_PORT=7790             # 实时预览静态服务器端口(需与上面的映射一致)
+      # OMP uses can1357/oh-my-pi by default and auto-updates after startup.
       # - OMP_CHANNEL=fast             # fast | stable | experimental
     volumes:
       - ../data:/data
-      # User explicitly chooses which project directories enter the container:
-      # - /path/to/your/project:/workspaces
+      # User explicitly chooses which project directories enter the container.
+      # 多根工作区:每个要打开的项目目录各挂一行,容器内的路径就是「添加目录」时填的路径。
+      # - /path/to/your/project:/workspaces/project
+      # - /path/to/another/project:/workspaces/another
+      # 只读挂载可加 :ro,但那样 AI 与编辑器都无法写入该目录。
     user: "1001:1001"
     security_opt:
       - no-new-privileges:true

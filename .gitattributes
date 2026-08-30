@@ -1,0 +1,8 @@
+# The container entrypoint must keep LF endings: a CRLF shebang makes the
+# kernel fail with "no such file or directory" when the image starts.
+*.sh text eol=lf
+
+# The product icon is generated (apps/desktop/build/generate-icon.mjs) and
+# committed so a clean checkout can run electron-builder directly. Never let
+# eol conversion touch it.
+*.ico binary

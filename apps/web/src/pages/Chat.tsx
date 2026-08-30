@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RouteInfo, streamChat, api, StreamEvent, SessionSummary, ChangedFileInfo } from '../api'
+import ChatInput from '../components/ChatInput'
 import DiffView from '../components/DiffView'
+import EditorTabs from '../components/EditorTabs'
 import FileTree from '../components/FileTree'
-import FileViewer from '../components/FileViewer'
-import SplitLayout, { SplitPanelDef } from '../components/SplitLayout'
+import PanelGrid, { GridPanelDef } from '../components/PanelGrid'
+import PanelToggles from '../components/PanelToggles'
+import PreviewPanel from '../components/PreviewPanel'
+import { onOpenFileRequest } from '../editor/openFile'
+import { useOpenTabs } from '../editor/useOpenTabs'
+import { idePanelDefs } from '../panels/idePanels'
+import { usePanelToggles } from '../panels/usePanelToggles'
+import { useWorkbenchBadges } from '../panels/useWorkbenchBadges'
+import { onWorkspaceChanged } from '../workspace/events'
+import { isOutsideWorkspace, rootNameOf } from '../workspace/paths'
 
 interface ToolCall {
   id: string
@@ -11,6 +21,7 @@ interface ToolCall {
   status: 'running' | 'done' | 'error'
   args?: unknown
   intent?: string
+  path?: string
   output?: string
   diff?: string
 }
@@ -25,6 +36,8 @@ interface Message {
 interface ChatProps {
   route: RouteInfo | null
   ompRunning: boolean
+  /** 页面是否可见。隐藏时组件保持挂载以继续接收流式数据,只是不做滚动。 */
+  active?: boolean
 }
 
 function ToolCard({ tool }: { tool: ToolCall }) {
@@ -79,7 +92,16 @@ function ChangedFilesRow({ files, onOpen }: { files: ChangedFileInfo[]; onOpen: 
   )
 }
 
-export default function Chat({ route, ompRunning }: ChatProps) {
+/** Mirror of the server's mutating-tool heuristic (omp/fileChanges.ts), used
+ *  only to decide whether a finished tool call should auto-open its file. */
+const NON_MUTATING = /^(read|grep|glob|ls|list|find|search|fetch|web|browse|bash|shell|exec|run|todo|task|think|plan)/i
+const MUTATING_STEM = /(edit|write|patch|create|replace|save|move|rename)/i
+
+function isMutatingToolName(name: string): boolean {
+  return !NON_MUTATING.test(name) && MUTATING_STEM.test(name)
+}
+
+export default function Chat({ route, ompRunning, active = true }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -89,12 +111,67 @@ export default function Chat({ route, ompRunning }: ChatProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [currentSessionPath, setCurrentSessionPath] = useState('')
   const [showFiles, setShowFiles] = useState(true)
-  const [viewerPath, setViewerPath] = useState<string | null>(null)
+  const [showPreview, setShowPreview] = useState(false)
+  /** Git / 终端 / 任务 / 审查 / 配置 / 诊断 面板的开合,持久化到 localStorage。
+   *  这些面板不依赖 OMP(直连模式下 git、终端、任务同样可用),因此开关常驻。 */
+  const panelToggles = usePanelToggles('botcf.panels.v1')
+  const { badges, alerts } = useWorkbenchBadges()
+  /** 多标签编辑器:打开顺序与活动标签持久化到 localStorage。
+   *  v2 起标签路径带工作区根名前缀(多根工作区),与 v1 的裸相对路径不兼容。 */
+  const tabs = useOpenTabs('botcf.tabs.v2')
+  /** 流式过程中即时累积的变更文件,让文件列表不必等轮次结束的汇总帧。 */
+  const [liveChanged, setLiveChanged] = useState<ChangedFileInfo[]>([])
   const abortRef = useRef<AbortController | null>(null)
+  /** Tool call id → workdir-relative file path, remembered from start frames so
+   *  an end frame without args can still auto-open the file it changed. */
+  const toolPathsRef = useRef(new Map<string, string>())
   const historyLoaded = useRef(false)
   const listRef = useRef<HTMLDivElement | null>(null)
   /** Follow streaming output unless the user scrolled up to read. */
   const stickToBottom = useRef(true)
+
+  /** 前台标签有未保存修改时,新文件只在后台开标签,不抢走正在编辑的视图。 */
+  const openFile = useCallback(
+    (path: string, options?: { activate?: boolean }) => {
+      tabs.open(path, options ?? { activate: !tabs.activeIsDirty })
+    },
+    [tabs]
+  )
+  const openFileRef = useRef(openFile)
+  openFileRef.current = openFile
+  const activeIsDirtyRef = useRef(tabs.activeIsDirty)
+  activeIsDirtyRef.current = tabs.activeIsDirty
+  const tabsRef = useRef(tabs)
+  tabsRef.current = tabs
+
+  // 目录被移出工作区后,指向它的标签页已经读不到文件了。关掉这些标签,但保留
+  // 有未保存修改的那些——静默丢弃草稿比留一个报错的标签更糟。
+  useEffect(
+    () =>
+      onWorkspaceChanged(() => {
+        api.workspace()
+          .then(({ roots }) => {
+            const names = new Set(roots.map((root) => root.name))
+            const editor = tabsRef.current
+            for (const path of editor.tabs.paths) {
+              if (!names.has(rootNameOf(path)) && !editor.dirtyPaths.has(path)) editor.close(path)
+            }
+          })
+          .catch(() => undefined)
+      }),
+    []
+  )
+
+  // Git、审查、诊断面板都用这个信号把文件交给编辑器;带行号时由对应的
+  // FileViewer 自己滚动到那一行(editor/openFile.ts)。
+  useEffect(
+    () =>
+      onOpenFileRequest((request) => {
+        if (isOutsideWorkspace(request.path)) return
+        openFileRef.current(request.path, { activate: request.activate !== false })
+      }),
+    []
+  )
 
   const onListScroll = () => {
     const el = listRef.current
@@ -103,33 +180,40 @@ export default function Chat({ route, ompRunning }: ChatProps) {
   }
 
   // 滚动更新:流式内容追加时自动滚到底部,加载出下面的新内容。
+  // 隐藏期间(display:none)scrollHeight 为 0,滚动无效,因此重新可见
+  // (active 变 true)时也要补一次,把隐藏期间累积的内容滚出来。
   useEffect(() => {
+    if (!active) return
     const el = listRef.current
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
-  }, [messages])
+  }, [messages, active])
 
-  /** Session-cumulative changed files, merged across every turn's summary. */
+  /** Session-cumulative changed files, merged across every turn's summary plus
+   *  the in-flight turn's live entries. */
   const sessionChanged = useMemo(() => {
     const DIFF_CAP = 200_000
     const merged = new Map<string, ChangedFileInfo>()
-    for (const message of messages) {
-      for (const file of message.changedFiles ?? []) {
-        const prev = merged.get(file.path)
-        if (!prev) {
-          merged.set(file.path, file)
-          continue
-        }
-        const joined = [prev.diff, file.diff].filter((part): part is string => Boolean(part)).join('\n')
-        merged.set(file.path, {
-          ...file,
-          tools: [...new Set([...prev.tools, ...file.tools])],
-          hasDiff: prev.hasDiff || file.hasDiff,
-          diff: joined ? joined.slice(Math.max(0, joined.length - DIFF_CAP)) : undefined
-        })
+    const absorb = (file: ChangedFileInfo) => {
+      const prev = merged.get(file.path)
+      if (!prev) {
+        merged.set(file.path, file)
+        return
       }
+      const joined = [prev.diff, file.diff].filter((part): part is string => Boolean(part)).join('\n')
+      merged.set(file.path, {
+        ...file,
+        tools: [...new Set([...prev.tools, ...file.tools])],
+        hasDiff: prev.hasDiff || file.hasDiff,
+        diff: joined ? joined.slice(Math.max(0, joined.length - DIFF_CAP)) : undefined
+      })
     }
+    for (const message of messages) {
+      for (const file of message.changedFiles ?? []) absorb(file)
+    }
+    // files_changed 到达时同名 live 条目已被清除,所以这里不会重复拼接差异。
+    for (const file of liveChanged) absorb(file)
     return merged
-  }, [messages])
+  }, [messages, liveChanged])
 
   const loadHistory = useCallback(async () => {
     const response = await api.history()
@@ -186,6 +270,7 @@ export default function Chat({ route, ompRunning }: ChatProps) {
         status: phase === 'end' ? (ev.isError ? 'error' : 'done') : 'running',
         args: ev.args ?? existing.args,
         intent: ev.intent ?? existing.intent,
+        path: ev.path ?? existing.path,
         output: ev.output ?? existing.output,
         diff: ev.diff ?? existing.diff
       }
@@ -201,9 +286,56 @@ export default function Chat({ route, ompRunning }: ChatProps) {
       const text = ev.text
       appendToAssistant((content) => content + text)
     }
-    if (ev.type === 'tool') updateTool(ev)
+    if (ev.type === 'tool') {
+      updateTool(ev)
+      if (ev.id && ev.path) toolPathsRef.current.set(ev.id, ev.path)
+      if (ev.phase === 'end' && ev.id) {
+        const target = ev.path ?? toolPathsRef.current.get(ev.id)
+        const mutating = Boolean(ev.diff) || isMutatingToolName(ev.name ?? '')
+        // 失败且没有 diff 的调用没改动文件,不计入列表也不跳转。
+        if (target && mutating && (ev.diff || !ev.isError)) {
+          const entry: ChangedFileInfo = {
+            path: target,
+            tools: [ev.name ?? '工具'],
+            lastToolCallId: ev.id,
+            hasDiff: Boolean(ev.diff),
+            isError: ev.isError === true,
+            ...(ev.diff ? { diff: ev.diff } : {})
+          }
+          setLiveChanged((prev) => {
+            const previous = prev.find((file) => file.path === target)
+            const merged: ChangedFileInfo = previous
+              ? {
+                  ...entry,
+                  tools: [...new Set([...previous.tools, ...entry.tools])],
+                  hasDiff: previous.hasDiff || entry.hasDiff,
+                  diff: [previous.diff, entry.diff].filter(Boolean).join('\n') || undefined
+                }
+              : entry
+            return [...prev.filter((file) => file.path !== target), merged]
+          })
+          // AI 改完一个文件就为它开一个标签页(不再挤掉上一个文件)。工作区外的
+          // 文件(路径为绝对形式)无法被文件接口读取,不打开以免只显示报错。
+          if (!ev.isError && !isOutsideWorkspace(target)) {
+            openFileRef.current(target, { activate: !activeIsDirtyRef.current })
+          }
+        }
+      }
+    }
     if (ev.type === 'files_changed' && ev.files) {
       const files = ev.files
+      // 这一帧是服务端的权威汇总,取代同名文件的流式临时条目,避免差异重复拼接。
+      setLiveChanged((prev) => prev.filter((file) => !files.some((summary) => summary.path === file.path)))
+      // 兜底:轮次结束的权威汇总里,为每个变更文件补一个标签页。
+      for (const file of files) {
+        if (!isOutsideWorkspace(file.path)) {
+          openFileRef.current(file.path, { activate: false })
+        }
+      }
+      const lastChanged = files[files.length - 1]
+      if (lastChanged && !activeIsDirtyRef.current && !isOutsideWorkspace(lastChanged.path)) {
+        openFileRef.current(lastChanged.path)
+      }
       setMessages((prev) => {
         const copy = [...prev]
         for (let i = copy.length - 1; i >= 0; i--) {
@@ -276,6 +408,8 @@ export default function Chat({ route, ompRunning }: ChatProps) {
     try {
       await api.newSession()
       setMessages([])
+      setLiveChanged([])
+      toolPathsRef.current.clear()
       setSessionTokens({ input: 0, output: 0 })
       setContextUsage(null)
       setNotice('已开始新会话')
@@ -290,6 +424,8 @@ export default function Chat({ route, ompRunning }: ChatProps) {
     try {
       await api.switchSession(sessionPath)
       setCurrentSessionPath(sessionPath)
+      setLiveChanged([])
+      toolPathsRef.current.clear()
       setSessionTokens({ input: 0, output: 0 })
       setContextUsage(null)
       await loadHistory()
@@ -322,6 +458,12 @@ export default function Chat({ route, ompRunning }: ChatProps) {
             {showFiles ? '隐藏文件' : '文件'}
           </button>
         )}
+        {ompRunning && (
+          <button onClick={() => setShowPreview((prev) => !prev)} style={{ fontSize: 12 }}>
+            {showPreview ? '隐藏预览' : '实时预览'}
+          </button>
+        )}
+        <PanelToggles toggles={panelToggles} badges={badges} alerts={alerts} />
       </div>
 
       <div ref={listRef} onScroll={onListScroll} style={{ flex: 1, overflowY: 'auto', border: '1px solid #ddd', borderRadius: 8, padding: 16, background: '#fff', minHeight: 0 }}>
@@ -329,25 +471,24 @@ export default function Chat({ route, ompRunning }: ChatProps) {
         {messages.map((message, index) => (
           <div key={index} style={{ marginBottom: 14 }}>
             <strong>{message.role === 'user' ? '你' : '助手'}:</strong>
-            <div style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{message.content || (streaming && index === messages.length - 1 && !message.tools?.length ? '…' : '')}</div>
+            <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', marginTop: 4 }}>{message.content || (streaming && index === messages.length - 1 && !message.tools?.length ? '…' : '')}</div>
             {message.tools?.map((tool) => <ToolCard key={tool.id} tool={tool} />)}
-            {message.changedFiles && message.changedFiles.length > 0 && <ChangedFilesRow files={message.changedFiles} onOpen={setViewerPath} />}
+            {message.changedFiles && message.changedFiles.length > 0 && <ChangedFilesRow files={message.changedFiles} onOpen={openFile} />}
           </div>
         ))}
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <input
+      <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'flex-end', minWidth: 0 }}>
+        <ChatInput
           value={input}
-          onChange={(event) => setInput(event.target.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() } }}
+          onChange={setInput}
+          onSubmit={send}
           disabled={!route || (streaming && !ompRunning)}
-          placeholder={!route ? '未选择路由' : streaming ? (ompRunning ? '生成中——输入内容回车可追加引导…' : '生成中…') : '输入消息…'}
-          style={{ flex: 1, padding: 12, borderRadius: 6, border: '1px solid #ccc' }}
+          placeholder={!route ? '未选择路由' : streaming ? (ompRunning ? '生成中——输入内容回车可追加引导,Shift+Enter 换行…' : '生成中…') : '输入消息…Enter 发送,Shift+Enter 换行'}
         />
         {streaming
-          ? <button onClick={abort} style={{ padding: '0 20px', background: '#d33', color: '#fff', border: 'none', borderRadius: 6 }}>中止</button>
-          : <button onClick={send} disabled={!route || !input.trim()} style={{ padding: '0 20px', borderRadius: 6 }}>发送</button>}
+          ? <button onClick={abort} style={{ flex: 'none', height: 42, padding: '0 20px', background: '#d33', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>中止</button>
+          : <button onClick={send} disabled={!route || !input.trim()} style={{ flex: 'none', height: 42, padding: '0 20px', borderRadius: 6 }}>发送</button>}
       </div>
 
       <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
@@ -359,32 +500,47 @@ export default function Chat({ route, ompRunning }: ChatProps) {
     </div>
   )
 
-  const panels: SplitPanelDef[] = [
-    { id: 'chat', title: ompRunning ? 'OMP 对话' : '对话(直连模式)', minWidth: 360, weight: 3, content: chatPanelContent },
+  const openTabCount = tabs.tabs.paths.length
+  const gridPanels: GridPanelDef[] = [
+    { id: 'chat', title: ompRunning ? 'OMP 对话' : '对话(直连模式)', minWidth: 320, minHeight: 200, weight: 3, content: chatPanelContent },
     ...(ompRunning && showFiles
       ? [{
           id: 'files',
-          title: '工作目录文件',
-          minWidth: 200,
+          title: '工作区文件',
+          minWidth: 180,
           weight: 1,
           closable: true,
           onClose: () => setShowFiles(false),
-          content: <FileTree changed={sessionChanged} onOpenFile={setViewerPath} />
+          content: <FileTree changed={sessionChanged} onOpenFile={openFile} />
         }]
       : []),
-    ...(viewerPath
+    ...(openTabCount > 0
       ? [{
           id: 'editor',
-          title: viewerPath,
-          mono: true,
-          minWidth: 320,
+          title: `编辑器 · ${openTabCount} 个标签`,
+          minWidth: 300,
+          minHeight: 160,
           weight: 2,
           closable: true,
-          onClose: () => setViewerPath(null),
-          content: <FileViewer path={viewerPath} diff={sessionChanged.get(viewerPath)?.diff} onClose={() => setViewerPath(null)} />
+          onClose: tabs.closeAll,
+          content: <EditorTabs tabs={tabs} diffFor={(path: string) => sessionChanged.get(path)?.diff} />
         }]
-      : [])
+      : []),
+    ...(showPreview
+      ? [{
+          id: 'preview',
+          title: '实时预览',
+          minWidth: 280,
+          minHeight: 180,
+          weight: 2,
+          closable: true,
+          onClose: () => setShowPreview(false),
+          content: <PreviewPanel onClose={() => setShowPreview(false)} />
+        }]
+      : []),
+    // Git / 终端 / 任务 / 审查 / 配置 / 诊断:只有打开的面板才挂载,关掉即停止其数据流。
+    ...idePanelDefs(panelToggles)
   ]
 
-  return <SplitLayout storageKey="botcf.layout.v1" panels={panels} />
+  return <PanelGrid storageKey="botcf.grid.v2" panels={gridPanels} />
 }

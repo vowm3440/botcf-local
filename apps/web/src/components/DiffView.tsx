@@ -1,8 +1,15 @@
 import { useMemo } from 'react'
+import { diffColor } from '../editor/diffPalette'
+import { wordSegments, type WordSegment } from '../editor/wordDiff'
 
 /** VS Code style inline diff: old/new line-number gutters, full-line
  *  backgrounds, and darker word-level emphasis on changed characters.
- *  Falls back to a plain unified rendering when no @@ hunk headers exist. */
+ *  Falls back to a plain unified rendering when no @@ hunk headers exist.
+ *
+ *  The raw report, deliberately: this view shows the diff text as the tool wrote
+ *  it. Reading the same change *in* the file — with the surrounding code and the
+ *  removed lines in place — is the inline view (editor/InlineDiffView.tsx), which
+ *  needs the file content this one never loads. */
 
 interface DiffViewProps {
   diff: string
@@ -10,41 +17,15 @@ interface DiffViewProps {
 
 type LineKind = 'add' | 'del' | 'hunk' | 'meta' | 'ctx'
 
-interface Segment {
-  text: string
-  emphasized: boolean
-}
-
 interface DiffRow {
   kind: LineKind
   text: string
   oldNo?: number
   newNo?: number
-  segments?: Segment[]
+  segments?: WordSegment[]
 }
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/
-
-/** Split a del/add line pair into common prefix, changed middle, common suffix. */
-function charSegments(delText: string, addText: string): [Segment[], Segment[]] {
-  let prefix = 0
-  while (prefix < delText.length && prefix < addText.length && delText[prefix] === addText[prefix]) prefix++
-  let suffix = 0
-  while (
-    suffix < delText.length - prefix &&
-    suffix < addText.length - prefix &&
-    delText[delText.length - 1 - suffix] === addText[addText.length - 1 - suffix]
-  ) suffix++
-  const split = (text: string): Segment[] => {
-    const segments: Segment[] = []
-    if (prefix > 0) segments.push({ text: text.slice(0, prefix), emphasized: false })
-    const middle = text.slice(prefix, text.length - suffix)
-    if (middle) segments.push({ text: middle, emphasized: true })
-    if (suffix > 0) segments.push({ text: text.slice(text.length - suffix), emphasized: false })
-    return segments
-  }
-  return [split(delText), split(addText)]
-}
 
 function parseRows(diff: string): { rows: DiffRow[]; numbered: boolean } {
   const rows: DiffRow[] = []
@@ -94,27 +75,39 @@ function parseRows(diff: string): { rows: DiffRow[]; numbered: boolean } {
     while (addEnd < rows.length && rows[addEnd].kind === 'add') addEnd++
     const pairs = Math.min(delEnd - i, addEnd - delEnd)
     for (let k = 0; k < pairs; k++) {
-      const [delSegments, addSegments] = charSegments(rows[i + k].text, rows[delEnd + k].text)
+      const [delSegments, addSegments] = wordSegments(rows[i + k].text, rows[delEnd + k].text)
       rows[i + k] = { ...rows[i + k], segments: delSegments }
       rows[delEnd + k] = { ...rows[delEnd + k], segments: addSegments }
     }
     i = addEnd
   }
 
+  // 无 @@ hunk 头的工具 diff:顺序推算旧/新行号,保证行号栏始终可用。
+  if (!rows.some((row) => row.kind === 'hunk') && rows.some((row) => row.kind === 'add' || row.kind === 'del')) {
+    let nextOld = 1
+    let nextNew = 1
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      if (row.kind === 'add') rows[i] = { ...row, newNo: nextNew++ }
+      else if (row.kind === 'del') rows[i] = { ...row, oldNo: nextOld++ }
+      else if (row.kind === 'ctx') rows[i] = { ...row, oldNo: nextOld++, newNo: nextNew++ }
+    }
+  }
+
   return { rows, numbered: rows.some((row) => row.oldNo !== undefined || row.newNo !== undefined) }
 }
 
 const ROW_BACKGROUNDS: Record<LineKind, string> = {
-  add: '#e6ffec',
-  del: '#ffebe9',
-  hunk: '#ddf4ff',
-  meta: '#f6f8fa',
-  ctx: '#ffffff'
+  add: diffColor.addRow,
+  del: diffColor.delRow,
+  hunk: diffColor.hunkRow,
+  meta: diffColor.metaRow,
+  ctx: diffColor.ctxRow
 }
 
 const EMPHASIS_BACKGROUNDS: Record<'add' | 'del', string> = {
-  add: '#abf2bc',
-  del: '#ffc1c0'
+  add: diffColor.addEmphasis,
+  del: diffColor.delEmphasis
 }
 
 const MONO = 'ui-monospace, Consolas, monospace'
@@ -131,24 +124,24 @@ export default function DiffView({ diff }: DiffViewProps) {
     flex: 'none',
     textAlign: 'right' as const,
     paddingRight: '0.5ch',
-    color: '#8c959f',
+    color: diffColor.gutterInk,
     userSelect: 'none' as const
   }
 
   return (
-    <div style={{ overflowX: 'auto', background: '#fff', border: '1px solid #eee', borderRadius: 6, fontSize: 12, lineHeight: 1.6, fontFamily: MONO }}>
+    <div style={{ overflowX: 'auto', background: diffColor.ctxRow, border: '1px solid #eee', borderRadius: 6, fontSize: 12, lineHeight: 1.6, fontFamily: MONO }}>
       {rows.map((row, index) => {
         if (row.kind === 'hunk' || row.kind === 'meta') {
           return (
-            <div key={index} style={{ whiteSpace: 'pre', padding: '0 8px', background: ROW_BACKGROUNDS[row.kind], color: row.kind === 'hunk' ? '#0969da' : '#57606a', fontWeight: 600 }}>
+            <div key={index} style={{ whiteSpace: 'pre', padding: '0 8px', background: ROW_BACKGROUNDS[row.kind], color: row.kind === 'hunk' ? diffColor.hunkInk : diffColor.metaInk, fontWeight: 600 }}>
               {row.text || ' '}
             </div>
           )
         }
         const marker = row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : ''
-        const markerColor = row.kind === 'add' ? '#1a7f37' : row.kind === 'del' ? '#cf222e' : '#8c959f'
+        const markerColor = row.kind === 'add' ? diffColor.addInk : row.kind === 'del' ? diffColor.delInk : diffColor.gutterInk
         return (
-          <div key={index} style={{ display: 'flex', whiteSpace: 'pre', background: ROW_BACKGROUNDS[row.kind], color: '#24292f' }}>
+          <div key={index} style={{ display: 'flex', whiteSpace: 'pre', background: ROW_BACKGROUNDS[row.kind], color: diffColor.ink }}>
             {numbered && <span style={gutterStyle}>{row.oldNo ?? ''}</span>}
             {numbered && <span style={gutterStyle}>{row.newNo ?? ''}</span>}
             <span style={{ width: '2ch', flex: 'none', textAlign: 'center', userSelect: 'none', color: markerColor, fontWeight: 600 }}>{marker}</span>

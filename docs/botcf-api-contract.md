@@ -14,6 +14,16 @@
 | 用量 | `GET /api/log/self/stat?type=0`(总量)、`GET /api/log/self`(单条日志含 token 数) |
 | 会话刷新 | 未观察到显式刷新端点;session Cookie 过期后需重新登录 |
 
+## 日志筛选契约复测(2026-08-18)
+
+目标端点:`GET /api/log/self`,待测参数:`token_name`、`model_name`、`group`、`start_timestamp`、`end_timestamp`。
+
+- 本次执行环境未运行本地服务,且 `apps/server/data/botcf.db` 的 `secrets` 表为空,没有可恢复的 session Cookie 或管理 Token。
+- `/api/log/self` 是需鉴权端点,因此本次无法在不重新索取用户凭据的前提下完成真实过滤对照请求,不能确认 BotCF 服务端会应用上述筛选参数。
+- 已有 2026-08-14 实测仍能确认基础分页契约:`p` 从 0 开始、`page_size` 控制每页数量、响应 `data` 含 `items`/`total`。
+
+实施决策:采用 **策略 B(本地分页拉取 + 过滤)**。本地 API 最多读取 100 页且最多保留 10,000 条,再按令牌、模型、分组和时间范围筛选;避免把正确性建立在未验证的上游过滤行为上。`BotcfClient.logs(query)` 仍会完整拼接这些参数,便于后续有登录态时复测并切换到策略 A。
+
 ## 端点明细
 
 ### 公开(无需登录)
@@ -51,4 +61,4 @@
 3. `/api/user/self/groups`(New API 控制台建 Key 下拉框的数据源,用户级)已接入为最优先的分组全集来源,形状同样宽容解析、失败静默降级;`GET /api/groups/debug` 返回各来源的实际形状与提取结果,供实测诊断。
 4. 非外接 Claude-Max 分组:BotCF 文档标记为 Claude Code 专用。应用现允许选择并在 UI 显示 ⚠ 警告,上游是否拒绝以实测为准。
 5. 验证过程中创建的测试 Key `omp-local-verify`(500K 额度)留在账户中,可在控制台删除。
-6. 模型状态来源实测(2026-08-16):官网状态页为 `/pricing`,每 ~12 秒轮询一次状态数据,形状已抓包确认——`{success, is_admin, data:{generated_at(秒), bucket_seconds:60, bucket_count:10, error_threshold:20, models:[{model, requests, successes, errors, success_rate, error_rate(百分比), avg_ttft_seconds, throughput_tps, buckets:[{start(秒), requests, successes, errors, error_rate}], display_state, ...}]}}`。用户报告请求 URL 为 `/api/status`,但 DevTools Name 列无法区分 `/api/status` 与 `/api/models/status`(后者对管理 Token 返回「权限不足」,可能接受会话 Cookie);两者均在自动探测候选列表中,解析器按 `data.models` 数组自校验。`/api/uptime/status` 可访问但 `data:[]`。
+6. 模型状态来源实测(2026-08-17):官网 `/pricing` 使用 `/botcf-pricing-group-order-admin?resource=model_status&group=<分组>` 获取状态,响应指定 `refresh_seconds:15`;形状为 `{success, is_admin, data:{generated_at(秒), bucket_seconds:60, bucket_count:10, error_threshold:20, refresh_seconds, group, monitor_rules, models:[{model, requests, successes, errors, success_rate, error_rate(百分比), avg_ttft_seconds, throughput_tps, buckets:[{start(秒), requests, successes, errors, error_rate}], display_state, display_error_threshold, display_avg_ttft_seconds, ...}]}}`。顶栏现使用同一分组资源并复刻官网规则:无调用=灰、全部失败=红、错误率达到显示阈值=紫、低于阈值=绿,同时处理 `monitor_rules`/`display_*` 覆盖和 `codex-pro` 的绿灰特例;旧 `/api/...` 候选仅保留为诊断回退。

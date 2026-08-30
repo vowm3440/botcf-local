@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { buildUpstreamRequest, extractDelta, normalizeAgentMessage, extractSessionUsage, normalizeToolEvent, parseSessionSummary } from '../src/routes/chat.js'
+import path from 'node:path'
+import {
+  buildUpstreamRequest,
+  extractAssistantDelta,
+  extractDelta,
+  normalizeAgentMessage,
+  normalizeSessionNotice,
+  extractSessionUsage,
+  normalizeToolEvent,
+  parseSessionSummary,
+  terminalOutcome
+} from '../src/routes/chat.js'
 import { parseContextLimit } from '../src/proxy/credentialProxy.js'
+import { EMPTY_WORKSPACE, addRoot, workspaceDisplayPath } from '../src/workspace/model.js'
 
 describe('extractSessionUsage', () => {
   it('reads snake_case top-level fields', () => {
@@ -20,8 +32,7 @@ describe('extractSessionUsage', () => {
   })
 })
 
-describe('normalizeToolEvent', () => {
-  it('keeps structured call arguments, intent and the extracted file path', () => {
+describe('normalizeToolEvent', () => {  it('keeps structured call arguments, intent and the extracted file path', () => {
     expect(normalizeToolEvent({
       type: 'tool_execution_start',
       toolCallId: 'call-1',
@@ -75,6 +86,28 @@ describe('normalizeToolEvent', () => {
       diff: '-old\\n+new',
       isError: false
     })
+  })
+
+  it('normalizes the path with the supplied workspace resolver so the UI can open it', () => {
+    const workdir = path.resolve('proj')
+    const added = addRoot(EMPTY_WORKSPACE, { path: workdir })
+    if (!added.ok) throw new Error(added.error)
+    expect(normalizeToolEvent({
+      type: 'tool_execution_start',
+      toolCallId: 'call-4',
+      toolName: 'edit',
+      args: { path: path.join(workdir, 'src', 'app.ts') }
+    }, (raw) => workspaceDisplayPath(added.workspace, raw))).toMatchObject({ path: `${added.root.name}/src/app.ts` })
+  })
+
+  it('carries the target path on end frames so a missed start frame still resolves', () => {
+    expect(normalizeToolEvent({
+      type: 'tool_execution_end',
+      toolCallId: 'call-5',
+      toolName: 'write',
+      args: { file_path: 'notes.md' },
+      result: { content: [{ type: 'text', text: 'ok' }] }
+    })).toMatchObject({ phase: 'end', path: 'notes.md', args: { file_path: 'notes.md' } })
   })
 })
 
@@ -179,5 +212,139 @@ describe('parseContextLimit', () => {
   it('extracts the documented limit from upstream errors', () => {
     expect(parseContextLimit("This model's maximum context length is 200000 tokens.")).toBe(200000)
     expect(parseContextLimit('random error')).toBeUndefined()
+  })
+})
+
+/** Thinking used to be dropped on the floor, which is what made a reasoning turn
+ *  render as a blank gap: the only *visible* text such a step emits is "\n\n". */
+describe('extractAssistantDelta', () => {
+  it('keeps documented text deltas as text', () => {
+    expect(extractAssistantDelta({ type: 'text_delta', delta: 'hello' })).toEqual({ kind: 'text', text: 'hello' })
+  })
+
+  it('classifies thinking and reasoning deltas separately from the answer', () => {
+    expect(extractAssistantDelta({ type: 'thinking_delta', delta: 'let me' })).toEqual({ kind: 'reasoning', text: 'let me' })
+    expect(extractAssistantDelta({ type: 'reasoning_delta', delta: 'think' })).toEqual({ kind: 'reasoning', text: 'think' })
+    expect(extractAssistantDelta({ type: 'thinking', thinking: 'about it' })).toEqual({ kind: 'reasoning', text: 'about it' })
+  })
+
+  it('keeps whitespace-only text deltas — the transcript decides what to do with them', () => {
+    expect(extractAssistantDelta({ type: 'text_delta', delta: '\n\n' })).toEqual({ kind: 'text', text: '\n\n' })
+  })
+
+  it('ignores tool-call deltas and malformed frames', () => {
+    expect(extractAssistantDelta({ type: 'toolcall_delta', delta: '{"a":' })).toBeNull()
+    expect(extractAssistantDelta({ type: 'text_delta' })).toBeNull()
+    expect(extractAssistantDelta({ type: 'text_delta', delta: '' })).toBeNull()
+    expect(extractAssistantDelta(undefined)).toBeNull()
+  })
+})
+
+describe('normalizeSessionNotice', () => {
+  it('narrates the lifecycle events the terminal UI shows', () => {
+    expect(normalizeSessionNotice({ type: 'auto_compaction_start' })).toEqual({ type: 'notice', level: 'info', text: '正在压缩上下文…' })
+    expect(normalizeSessionNotice({ type: 'auto_compaction_end' })?.level).toBe('info')
+    expect(normalizeSessionNotice({ type: 'retry_fallback_succeeded' })?.level).toBe('info')
+  })
+
+  it('marks failure-shaped events as warnings and carries their detail', () => {
+    const retry = normalizeSessionNotice({ type: 'auto_retry_start', attempt: 2, reason: '502 upstream  error' })
+    expect(retry?.level).toBe('warn')
+    expect(retry?.text).toBe('上游失败,正在重试 (第 2 次):502 upstream error')
+    expect(normalizeSessionNotice({ type: 'retry_fallback_applied', modelId: 'gpt-5.4' })?.text).toContain('gpt-5.4')
+  })
+
+  it('passes runtime notices through with their own severity', () => {
+    expect(normalizeSessionNotice({ type: 'notice', message: '磁盘将满', level: 'warning' })?.level).toBe('warn')
+    expect(normalizeSessionNotice({ type: 'notice', message: '已加载扩展' })?.level).toBe('info')
+  })
+
+  it('stays silent for frames with nothing to say', () => {
+    expect(normalizeSessionNotice({ type: 'notice' })).toBeNull()
+    expect(normalizeSessionNotice({ type: 'model_changed' })).toBeNull()
+    expect(normalizeSessionNotice({ type: 'turn_start' })).toBeNull()
+    expect(normalizeSessionNotice({ type: 'message_update' })).toBeNull()
+  })
+})
+
+/** The two quiet failures that both rendered as a blank "助手:": a turn that
+ *  spent its whole output budget thinking, and a model call that failed outright
+ *  (a 409 route mismatch looked exactly like a model with nothing to say). */
+describe('terminalOutcome', () => {
+  it('warns when the last assistant message hit the output ceiling', () => {
+    expect(terminalOutcome({
+      type: 'agent_end',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '看看这个项目' }] },
+        { role: 'assistant', stopReason: 'toolUse', content: [] },
+        { role: 'assistant', stopReason: 'length', content: [{ type: 'thinking', thinking: '…' }] }
+      ]
+    })).toEqual({ kind: 'length' })
+  })
+
+  it('reports a failed model call with its status and message', () => {
+    expect(terminalOutcome({
+      type: 'agent_end',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        {
+          role: 'assistant',
+          stopReason: 'error',
+          errorStatus: 409,
+          errorMessage: '当前路由是 chat 接口,收到的却是 messages 请求',
+          content: []
+        }
+      ]
+    })).toEqual({
+      kind: 'error',
+      status: 409,
+      message: '当前路由是 chat 接口,收到的却是 messages 请求'
+    })
+  })
+
+  it('accepts a nested error object and drifting field names', () => {
+    expect(terminalOutcome({
+      messages: [{ role: 'assistant', stop_reason: 'failed', error: { message: 'upstream 502', statusCode: 502 } }]
+    })).toEqual({ kind: 'error', status: 502, message: 'upstream 502' })
+  })
+
+  it('still reports an error when the turn produced no assistant message', () => {
+    expect(terminalOutcome({ type: 'agent_end', stopReason: 'error', errorMessage: '进程无响应', messages: [{ role: 'user' }] }))
+      .toEqual({ kind: 'error', status: null, message: '进程无响应' })
+  })
+
+  it('never leaves an error without a reason to show', () => {
+    expect(terminalOutcome({ messages: [{ role: 'assistant', stopReason: 'error' }] })).toEqual({
+      kind: 'error',
+      status: null,
+      message: '模型调用失败,运行时没有给出原因'
+    })
+  })
+
+  it('classifies an interrupted turn as aborted, not as an error', () => {
+    expect(terminalOutcome({ messages: [{ role: 'assistant', stopReason: 'aborted' }] })).toEqual({ kind: 'aborted' })
+    expect(terminalOutcome({ messages: [{ role: 'assistant', stopReason: 'cancelled' }] })).toEqual({ kind: 'aborted' })
+  })
+
+  it('says nothing for a turn that ended normally', () => {
+    expect(terminalOutcome({ messages: [{ role: 'assistant', stopReason: 'endTurn' }] })).toEqual({ kind: 'normal' })
+    expect(terminalOutcome({ messages: [{ role: 'assistant', stopReason: 'toolUse' }] })).toEqual({ kind: 'normal' })
+  })
+
+  it('only inspects the final assistant message', () => {
+    expect(
+      terminalOutcome({
+        messages: [
+          { role: 'assistant', stopReason: 'length' },
+          { role: 'assistant', stopReason: 'endTurn' }
+        ]
+      })
+    ).toEqual({ kind: 'normal' })
+  })
+
+  it('tolerates frames without a message array', () => {
+    expect(terminalOutcome({ type: 'agent_end' })).toEqual({ kind: 'normal' })
+    expect(terminalOutcome({ messages: [] })).toEqual({ kind: 'normal' })
+    expect(terminalOutcome({ messages: [{ role: 'user' }] })).toEqual({ kind: 'normal' })
   })
 })
