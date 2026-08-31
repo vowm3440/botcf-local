@@ -413,8 +413,15 @@ function report(result) {
     const steps = HEAP_MARK_LABELS.filter(([key]) => marks[key]).map(
       ([key, label]) => `${label} ${marks[key].usedMiB}/${marks[key].totalMiB}`
     )
-    log('JS 堆 已用/已提交 MiB')
+    // Proof, not inference. `--gc-marks` collects only when the page actually exposes
+    // `window.gc`, so a run that asked for it and silently did not collect would look
+    // like an ordinary one and be read as a much quieter machine.
+    const collected = Object.values(marks).some((mark) => mark && mark.collected === true)
+    log(`JS 堆 已用/已提交 MiB${collected ? '(每个阶段边界已强制回收 —— 与默认运行不可比)' : ''}`)
     log(`  ${steps.join(' → ')}`)
+    if (GC_MARKS && !collected) {
+      log('  !! 要求了 --gc-marks,但页面没有 window.gc —— 这些数字是普通运行,不是诊断运行')
+    }
   }
   log(`renderer  空工作台 ${memory.rendererBaselineMiB} MiB → 编辑器峰值 ${memory.rendererLoadPeakMiB} MiB → 内联峰值 ${memory.rendererInlinePeakMiB} MiB → 关闭后 ${memory.rendererAfterCloseMiB} MiB`)
   log(

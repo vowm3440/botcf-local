@@ -17,6 +17,8 @@
     "test": "npm run test -w apps/server && npm run test -w apps/web",
     "test:e2e": "npm run build && electron e2e/editor.cjs",
     "perf:editor": "npm run build && electron perf/editor-load.cjs",
+    "perf:spread": "npm run build && node perf/spread.cjs",
+    "verify": "npm run build && npm test && electron e2e/editor.cjs && electron perf/editor-load.cjs",
     "start": "npm run start -w apps/server"
   },
   "engines": {

@@ -1,0 +1,87 @@
+# CI for this repository — and an honest note about what CI can and cannot run here.
+#
+# Nothing ran either harness automatically before this file existed, which made the
+# gate's own README half true: "a gate nobody runs is not a gate". But this repository
+# has no remote yet, so this workflow has never executed. It is written to be correct
+# on the day one is added, not presented as something already proven.
+#
+# `npm run verify` is the local equivalent and is the one that works today:
+#   build → unit tests → editor E2E → editor load gate, in that order, failing fast.
+#
+# The split below is not tidiness, it is a real constraint. The unit tests and the
+# build are ordinary Node work and run anywhere. The E2E and the perf gate open a real
+# Electron window and use frame callbacks as their clock — Chromium suspends those for
+# a page it considers hidden, and on Windows a window another window covers counts as
+# occluded. They need a desktop session, which is why they are on a windows runner and
+# not on the headless default.
+#
+# And the gate's latency limits were derived from one specific machine (win32, 32
+# cores, Electron 43.4.0 — see perf/thresholds.json). A shared CI runner is a
+# different machine, so those numbers do not transfer: run it there a few times with
+# `npm run perf:spread` first and re-derive from that distribution, exactly as the
+# notes in thresholds.json describe. Until that is done, the gate job is manual
+# (`workflow_dispatch`) rather than a merge blocker, because a red that only means
+# "the runner is slower" teaches nobody anything and gets ignored.
+#
+# What *does* transfer, and could gate a PR today, are the structural invariants:
+# one mounted viewer for eight tabs, and the inline view keeping ~152 rows in the DOM
+# whether it models 3,150 or 3,721. Those are machine-independent by construction.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: build and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # `npm run build` runs tsc for both workspaces, so this is the type check too.
+      - run: npm run build
+      - run: npm test
+
+  browser:
+    name: editor E2E (needs a desktop session)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:e2e
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-last-run
+          path: e2e/last-run.json
+          if-no-files-found: warn
+
+  gate:
+    name: editor load gate (manual — limits are machine-derived)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run perf:editor
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-last-run
+          path: perf/last-run.json
+          if-no-files-found: warn

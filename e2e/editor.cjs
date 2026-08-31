@@ -168,6 +168,7 @@ async function run() {
       gitReady: load.gitReady,
       expandedOnlyLine: fixture.LINE_ONLY_VISIBLE_WHEN_EXPANDED,
       diagnosticMessage: `e2e runtime error ${Date.now()}`,
+      commitMessage: `e2e commit ${Date.now()}`,
       changedFiles,
       expected,
       timeoutMs: 30_000

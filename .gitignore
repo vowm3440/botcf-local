@@ -9,4 +9,6 @@ botcf_contract_result.txt
 response.txt
 *.key
 perf/last-run.json
+perf/runs/
+perf/spread.json
 e2e/last-run.json

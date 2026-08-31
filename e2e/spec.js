@@ -150,6 +150,16 @@
     return Math.round(host.getBoundingClientRect().height / 18)
   }
 
+  /** The Git panel's own text, for assertions and for failure messages. Anchored on
+   *  the commit box because that is rendered whether or not the directory is a
+   *  repository — so "the panel is not here" and "the panel says it is not a repo"
+   *  stay distinguishable, and they are very different bugs. */
+  function gitPanelText() {
+    const box = document.querySelector('input[aria-label="提交信息"][placeholder^="提交信息"]')
+    const panel = box ? box.closest('div')?.parentElement : null
+    return panel ? panel.textContent.trim() : '(Git 面板不在页面上)'
+  }
+
   /** The rail button that opens a workbench part. */
   function railButton(title) {
     return document.querySelector(`[aria-label="活动栏"] button[title^="${title}"]`)
@@ -214,6 +224,22 @@
   function typeInto(surface, text) {
     surface.focus()
     return document.execCommand('insertText', false, text)
+  }
+
+  /** `window.confirm` for the duration of one click.
+   *
+   *  Two of the Git panel's write actions are gated on it, and in an automated window
+   *  nobody answers the dialog. Replaced narrowly and restored immediately: the point
+   *  is to answer the question, not to remove it — a change that dropped the
+   *  confirmation entirely would still pass these checks, and should not. */
+  function withConfirm(answer, act) {
+    const original = window.confirm
+    window.confirm = () => answer
+    try {
+      return act()
+    } finally {
+      window.confirm = original
+    }
   }
 
   /** The undo binding is `Mod-z`, which is Cmd on macOS and Ctrl everywhere else. */
@@ -435,14 +461,13 @@
       // Not skipped when git is missing — failed, with the reason. A check nobody ran
       // is not a check that passed; the same rule `jsHeapRetainedMiB` follows.
       expect(options.gitReady, 'git 不可用,或夹具仓库没有建起来 —— 这一项没有跑,不算通过')
-      await openPart('源代码管理', '[aria-label="提交信息"]')
+      await openPart('源代码管理', 'input[aria-label="提交信息"][placeholder^="提交信息"]')
       const entry = await waitFor(`${options.trackedFile} 的条目`, () =>
         document.querySelector(`button[title="${options.trackedFile}"]`)
       ).catch(() => {
         // A bare timeout here would not say whether the panel was closed, showed no
         // repository, or listed nothing — three very different bugs.
-        const panel = document.querySelector('[aria-label="提交信息"]')?.closest('div')?.parentElement
-        throw new Error(`Git 面板里找不到 ${options.trackedFile};面板当前显示:${JSON.stringify((panel?.textContent ?? '(面板不在页面上)').trim().slice(0, 200))}`)
+        throw new Error(`Git 面板里找不到 ${options.trackedFile};面板当前显示:${JSON.stringify(gitPanelText().slice(0, 200))}`)
       })
       expectEqual(entry.textContent.trim(), options.trackedFile, 'Git 条目显示的路径')
       const row = entry.parentElement
@@ -464,6 +489,52 @@
         const row = document.querySelector(`button[title="${options.trackedFile}"]`)?.parentElement
         return Boolean(row && [...row.querySelectorAll('button')].some((button) => button.textContent.trim() === '取消暂存'))
       })
+    })
+
+    await check('Git 面板能提交已暂存的改动', async () => {
+      expect(options.gitReady, 'git 不可用 —— 这一项没有跑,不算通过')
+      // Scoped by placeholder: the review panel has a commit box with the same
+      // accessible name, and only one of the two is ever mounted.
+      const box = await waitFor('提交信息输入框', () =>
+        document.querySelector('input[aria-label="提交信息"][placeholder^="提交信息"]')
+      )
+      expect(typeInto(box, options.commitMessage), '提交信息输入框拒绝了输入')
+      await waitFor('提交信息进入面板状态', () => box.value.includes(options.commitMessage))
+      box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      await waitFor('工作区变干净', () => document.querySelector(`button[title="${options.trackedFile}"]`) === null)
+      const panel = gitPanelText()
+      expect(panel.includes('工作区是干净的'), `提交后面板没有说工作区干净:${JSON.stringify(panel.slice(0, 120))}`)
+    })
+
+    await check('Git 面板能撤销上一个提交,改动回到工作区', async () => {
+      expect(options.gitReady, 'git 不可用 —— 这一项没有跑,不算通过')
+      const history = await waitFor('「历史」按钮', () =>
+        [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '历史')
+      )
+      history.click()
+      const undo = await waitFor('「撤销上一个提交」按钮', () =>
+        document.querySelector('button[title^="把分支指针回退一个提交"]')
+      )
+      withConfirm(true, () => undo.click())
+      // `mixed`, so the change comes back as an *unstaged* modification — the state
+      // the fixture started in.
+      const entry = await waitFor('改动回到未提交列表', () =>
+        document.querySelector(`button[title="${options.trackedFile}"]`)
+      )
+      expect(entry.parentElement.textContent.includes('修改'), '回退后的条目没有标成已修改')
+    })
+
+    await check('Git 面板能丢弃一个文件的未提交修改', async () => {
+      expect(options.gitReady, 'git 不可用 —— 这一项没有跑,不算通过')
+      const entry = await waitFor(`${options.trackedFile} 的条目`, () =>
+        document.querySelector(`button[title="${options.trackedFile}"]`)
+      )
+      const discard = [...entry.parentElement.querySelectorAll('button')].find((button) =>
+        (button.getAttribute('title') ?? '').startsWith('丢弃这个文件')
+      )
+      expect(Boolean(discard), '找不到「丢弃这个文件的未提交修改」按钮')
+      withConfirm(true, () => discard.click())
+      await waitFor('丢弃后工作区变干净', () => document.querySelector(`button[title="${options.trackedFile}"]`) === null)
     })
 
     await check('诊断中心收下运行时报错,并能跳到出错的那一行', async () => {
