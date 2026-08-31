@@ -58,5 +58,25 @@ export const config = {
     profile: process.env.OMP_STARTUP_PROFILE,
     readyTimeoutMs: optionalMs(process.env.OMP_READY_TIMEOUT_MS),
     stateTimeoutMs: optionalMs(process.env.OMP_STATE_TIMEOUT_MS)
-  }
+  },
+
+  /** Launch the agent runtime from somewhere other than the updater-managed
+   *  `<dataDir>/omp/current/`.
+   *
+   *  A bare path names another binary — the case for anyone running their own OMP
+   *  build, who otherwise has no way to make the app use it. A JSON array gives the
+   *  whole command, for a build that has to run through an interpreter or a wrapper;
+   *  `--mode rpc` is still appended, and the process must still speak the RPC
+   *  protocol (rpc.md), so this changes *which* runtime starts and nothing about how
+   *  the app talks to it.
+   *
+   *  The array form is what the test harness needs on Windows, and it is worth being
+   *  plain about that: `spawn` there requires a real executable, so a stub written in
+   *  JavaScript cannot be reached by a path alone. It is a genuine escape hatch that
+   *  a test also uses, not a hook that exists only for the test — but the honest
+   *  reading is that the test is why it exists now.
+   *
+   *  The updater keeps managing `current/` regardless; while this is set, the version
+   *  it reports is not the runtime that is running. */
+  ompCommand: process.env.OMP_COMMAND?.trim() || undefined
 }

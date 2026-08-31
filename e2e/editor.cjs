@@ -140,6 +140,31 @@ function buildLoad(load) {
   }
 }
 
+/** Put a stub agent runtime behind the server, so the checks that need a *real* turn
+ *  can have one.
+ *
+ *  `OMP_COMMAND` is the array form on purpose: `spawn` on Windows needs a real
+ *  executable, so a JavaScript stub cannot be reached by a path alone. The plan file
+ *  lives outside the workspace root — inside it, git would report it as untracked and
+ *  the Git panel checks would be looking at a different working tree than the fixture
+ *  set up. */
+function stubRuntime(load, changedFiles) {
+  const planFile = path.join(os.tmpdir(), 'botcf-e2e-omp-plan.json')
+  const plan = {
+    text: '已经按要求改好了。',
+    files: changedFiles.map((file) => ({ path: file.path, diff: file.diff, tool: 'edit_file' }))
+  }
+  fs.writeFileSync(planFile, JSON.stringify(plan), 'utf8')
+  return {
+    planFile,
+    env: {
+      OMP_COMMAND: JSON.stringify([process.platform === 'win32' ? 'node.exe' : 'node', path.join(REPO, 'harness', 'ompStub.cjs')]),
+      OMP_STUB_PLAN: planFile,
+      OMP_STUB_SESSION: path.join(load.dir, '..', 'botcf-e2e-session.jsonl')
+    }
+  }
+}
+
 async function run() {
   const build = requireBuild()
   const load = await fixture.create()
@@ -147,8 +172,10 @@ async function run() {
   const { changedFiles, expected } = buildLoad(load)
   log(`session diff ${expected.regions} regions · +${expected.added} −${expected.removed}`)
   log(load.gitReady ? `git repo ready · ${load.trackedFile} modified` : 'git 不可用 —— Git 面板的检查会判失败')
+  const stub = stubRuntime(load, changedFiles)
+  log('stub agent runtime behind the server (harness/ompStub.cjs)')
 
-  harness.startServer(build)
+  harness.startServer(build, stub.env)
   await withTimeout(harness.waitForHealth(), BUDGET.serverHealth + 5_000, '等待本地服务')
   await withTimeout(harness.seedSession(), 30_000, '建立会话')
   await withTimeout(harness.addRoot(load.dir, true), 30_000, '添加工作区根目录')
@@ -226,7 +253,12 @@ function cleanup() {
   if (!cleanupPromise) {
     cleanupPromise = (async () => {
       await harness.cleanup({ keepData: KEEP })
-      if (!KEEP) await fixture.remove()
+      if (KEEP) return
+      // Reported, not swallowed. A removal that fails silently is why a run once
+      // announced a clean teardown and left the git repository behind for the next
+      // one to die on.
+      const gone = await fixture.remove((error) => log(`夹具目录未能删除: ${error.message}`))
+      if (!gone) log(`夹具目录仍在,下次运行前需要手动删除: ${fixture.fixtureDir()}`)
     })().catch((error) => log(`清理失败: ${error && error.message ? error.message : String(error)}`))
   }
   return cleanupPromise

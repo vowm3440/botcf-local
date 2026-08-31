@@ -97,7 +97,7 @@ function createHarness(options) {
     process.stdout.write(`[${label}] ${message}\n`)
   }
 
-  function startServer(build) {
+  function startServer(build, extraEnv = {}) {
     fs.rmSync(dataDir, { recursive: true, force: true })
     serverProc = spawn(process.platform === 'win32' ? 'node.exe' : 'node', [build.server], {
       cwd: path.join(REPO, 'apps', 'server'),
@@ -112,7 +112,8 @@ function createHarness(options) {
         // start and a fresh data directory would have it install an agent binary
         // mid-run. A dead proxy fails those requests immediately.
         HTTP_PROXY: 'http://127.0.0.1:9',
-        HTTPS_PROXY: 'http://127.0.0.1:9'
+        HTTPS_PROXY: 'http://127.0.0.1:9',
+        ...extraEnv
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false

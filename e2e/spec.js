@@ -567,6 +567,32 @@
       )
     })
 
+    // Last, and the only one that needs the *server* to run a turn. Everything above
+    // is reachable with the upstream faked in the renderer; the review panel is not —
+    // `recordAgentTurn` is called on the OMP branch of routes/chat.ts, so a real
+    // message has to go out and a real runtime has to answer it. That is what the stub
+    // behind the server is for. It runs last because the turn opens tabs and moves the
+    // editor, which would make the cross-panel assertions above pass for the wrong
+    // reason.
+    await check('真实的一次 agent 回合填出审查面板', async () => {
+      await window.__HARNESS__.sendMessage('(e2e) 改一处给审查面板看', { timeoutMs })
+      // A turn's changed files each open a tab — the app's own signal that the
+      // server-side summary arrived, rather than a guess about timing.
+      await waitFor('回合改动的文件打开成标签', () =>
+        editorTabs().some((tab) => tab.title.startsWith(options.editedPath))
+      )
+      // Marker chosen for being unconditional: 「提交目录」 only renders when there are
+      // items *and* more than one root, so on a single-root workspace it never appears
+      // and would have waited for a panel that was already open.
+      await openPart('AI 修改审查', 'button[title^="把所有待审查文件标记为保留"]')
+      // 「第 N 轮」 is written from the recorded turn, so finding it is the proof that
+      // the *server* stored one — the thing no renderer-side fake can produce.
+      const item = await waitFor('审查条目', () => document.querySelector('[title*="第 1 轮"]'))
+      const title = item.getAttribute('title') ?? ''
+      expect(title.includes('edit_file'), `审查条目没有记下工具名:${JSON.stringify(title)}`)
+      return title
+    })
+
     return { ok: checks.every((entry) => entry.ok === true), checks }
   } catch (error) {
     // Returned, not thrown: the main process needs the checks that did run.

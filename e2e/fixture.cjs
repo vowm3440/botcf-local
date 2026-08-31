@@ -154,11 +154,11 @@ async function create() {
   }
 }
 
-function remove() {
-  // Not a bare rmSync: this directory is a git repository, and git writes the files
-  // under `.git/objects` read-only — the first version came back EPERM and took the
-  // whole run's exit with it.
-  return removeDirectory(fixtureDir())
+/** Returns whether the directory is gone. The caller must say so when it is not:
+ *  a teardown that quietly leaves the repository behind is what makes the *next*
+ *  run die in `create()` for a reason that has nothing to do with it. */
+function remove(onFailure) {
+  return removeDirectory(fixtureDir(), onFailure)
 }
 
 module.exports = {

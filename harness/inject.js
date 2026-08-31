@@ -88,6 +88,29 @@
   }
 
   window.__HARNESS__ = {
+    /** Send a message for real: no stub, no interception.
+     *
+     *  For the checks that need the *server* to run a turn — the review panel and the
+     *  agent half of the diagnostics centre are written by `recordAgentTurn` and
+     *  `diagnosticsCenter` on the OMP branch of routes/chat.ts, which a renderer-side
+     *  fake can never reach. With a stub runtime behind the server (harness/ompStub.cjs)
+     *  this is an end-to-end turn through every real layer. */
+    async sendMessage(text, options = {}) {
+      const timeoutMs = options.timeoutMs ?? 60_000
+      const composer = await waitFor(
+        '对话输入框',
+        () => {
+          const found = document.querySelector(COMPOSER)
+          if (found && !found.disabled) return found
+          document.querySelector(CHAT_RAIL)?.click()
+          return null
+        },
+        timeoutMs
+      )
+      await submit(composer, text)
+      return true
+    },
+
     /** Deliver `files` (ChangedFileInfo[]) as one finished turn. Resolves once every
      *  path has a tab, which is the app's own signal that it accepted them: a turn's
      *  changed files each open a tab. Rejects, never hangs. */

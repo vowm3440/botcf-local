@@ -49,6 +49,36 @@ export function ompBinaryPath(): string {
   return path.join(config.ompDir, 'current', name)
 }
 
+export interface OmpCommand {
+  file: string
+  /** Prefix arguments; `--mode rpc` is appended after these. */
+  args: string[]
+  /** True when `OMP_COMMAND` chose this rather than the updater-managed path. */
+  overridden: boolean
+}
+
+/** What to launch, and how.
+ *
+ *  Normally the updater-managed binary with no prefix arguments. `OMP_COMMAND`
+ *  overrides it: a bare string names a different binary, a JSON array gives the whole
+ *  command so a runtime that has to run through an interpreter or a wrapper can be
+ *  used (see config.ts). Either way `--mode rpc` is appended and the process must
+ *  speak the same protocol. */
+export function ompCommand(): OmpCommand {
+  const override = config.ompCommand
+  if (!override) return { file: ompBinaryPath(), args: [], overridden: false }
+  if (!override.startsWith('[')) return { file: override, args: [], overridden: true }
+  try {
+    const parsed: unknown = JSON.parse(override)
+    const parts = Array.isArray(parsed) ? parsed.filter((part): part is string => typeof part === 'string') : []
+    if (parts.length > 0) return { file: parts[0], args: parts.slice(1), overridden: true }
+  } catch {
+    // Fall through: a malformed override is not a reason to launch nothing, and the
+    // spawn failure below names the value that was actually used.
+  }
+  return { file: override, args: [], overridden: true }
+}
+
 export interface BotcfModelConfigRow {
   model_id: string
   api_type: 'responses' | 'chat' | 'messages'
@@ -160,8 +190,11 @@ export class OmpRpcClient extends EventEmitter {
     super()
   }
 
-  private binaryPath(): string {
-    return this.options.binaryPath?.() ?? ompBinaryPath()
+  /** The command this client launches, honouring the test seam when one is given. */
+  private command(): OmpCommand {
+    const seam = this.options.binaryPath?.()
+    if (seam) return { file: seam, args: [], overridden: false }
+    return ompCommand()
   }
 
   /** Startup/RPC ceilings for this client. */
@@ -185,7 +218,12 @@ export class OmpRpcClient extends EventEmitter {
   }
 
   get available(): boolean {
-    return (this.options.binaryExists ?? fs.existsSync)(this.binaryPath())
+    const command = this.command()
+    // An explicit override is the operator asserting the command exists — a typo then
+    // fails loudly at spawn, which is better than silently downgrading to direct mode
+    // because `existsSync('node')` is false.
+    if (command.overridden) return true
+    return (this.options.binaryExists ?? fs.existsSync)(command.file)
   }
 
   get running(): boolean {
@@ -202,7 +240,8 @@ export class OmpRpcClient extends EventEmitter {
     this.lastReadyMs = null
     this.spawnedAt = performance.now()
     const proxyBase = `http://127.0.0.1:${config.proxyPort}`
-    const child = (this.options.spawnProcess ?? spawn)(this.binaryPath(), ['--mode', 'rpc'], {
+    const command = this.command()
+    const child = (this.options.spawnProcess ?? spawn)(command.file, [...command.args, '--mode', 'rpc'], {
       env: {
         ...process.env,
         PI_CODING_AGENT_DIR: ompAgentDir(),

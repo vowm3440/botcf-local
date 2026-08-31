@@ -616,7 +616,9 @@ function cleanup() {
   if (!cleanupPromise) {
     cleanupPromise = (async () => {
       await harness.cleanup({ keepData: KEEP })
-      if (!KEEP) await fixture.remove()
+      if (KEEP) return
+      const gone = await fixture.remove((error) => log(`夹具目录未能删除: ${error.message}`))
+      if (!gone) log(`夹具目录仍在,下次运行会覆盖它: ${fixture.fixtureDir()}`)
     })().catch((error) => log(`清理失败: ${error && error.message ? error.message : String(error)}`))
   }
   return cleanupPromise

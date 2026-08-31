@@ -129,8 +129,8 @@ function create() {
   }
 }
 
-function remove() {
-  return removeDirectory(fixtureDir())
+function remove(onFailure) {
+  return removeDirectory(fixtureDir(), onFailure)
 }
 
 /** How many places the assistant "changed" in each file.
