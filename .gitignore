@@ -7,6 +7,9 @@ data/
 apps/server/data/
 botcf_contract_result.txt
 response.txt
+login.txt
+verify_botcf.py
+tmp-undici-probe.cjs
 *.key
 perf/last-run.json
 perf/runs/
