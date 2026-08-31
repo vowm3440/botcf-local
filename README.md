@@ -1,3 +1,5 @@
+wish coding产物
+
 # BotCF 本地控制台
 
 以 BotCF(botcf.com)为远端账户/分组/模型/计费中心的本地 AI 工作台:
