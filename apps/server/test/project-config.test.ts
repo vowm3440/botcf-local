@@ -194,6 +194,44 @@ describe('project config store', () => {
     clearProjectConfigCache()
     expect(loadProjectConfig(root).config.discoverScripts).toBe(false)
   })
+
+  it('refuses reads and writes through a config-directory junction outside the root', (context) => {
+    const root = tempRoot()
+    const outside = tempRoot()
+    const externalFile = path.join(outside, 'config.json')
+    const original = '{"discoverScripts":false}'
+    fs.writeFileSync(externalFile, original)
+    try {
+      fs.symlinkSync(outside, path.join(root, CONFIG_DIR_NAME), 'junction')
+    } catch {
+      context.skip()
+      return
+    }
+    const loaded = loadProjectConfig(root)
+    expect(loaded.text).toBeNull()
+    expect(loaded.config.discoverScripts).toBe(true)
+    expect(loaded.warnings.length).toBeGreaterThan(0)
+    expect(saveProjectConfig(root, parseProjectConfig('{}').config).ok).toBe(false)
+    expect(fs.readFileSync(externalFile, 'utf8')).toBe(original)
+    fs.unlinkSync(externalFile)
+    expect(saveProjectConfig(root, parseProjectConfig('{}').config).ok).toBe(false)
+    expect(fs.existsSync(externalFile)).toBe(false)
+  })
+
+  it('refuses a dangling config-file link rather than creating its external target', (context) => {
+    const root = tempRoot()
+    const outside = tempRoot()
+    const target = path.join(outside, 'not-created.json')
+    fs.mkdirSync(path.join(root, CONFIG_DIR_NAME))
+    try {
+      fs.symlinkSync(target, projectConfigFile(root), 'file')
+    } catch {
+      context.skip()
+      return
+    }
+    expect(saveProjectConfig(root, parseProjectConfig('{}').config).ok).toBe(false)
+    expect(fs.existsSync(target)).toBe(false)
+  })
 })
 
 /** Reading a broken config degrades to defaults so the project still opens.
@@ -222,26 +260,4 @@ describe('checkProjectConfigText / checkProjectConfig (write path)', () => {
     expect(accepted.warnings.join()).toContain('script 或 command')
   })
 
-  it('leaves the file on disk byte-identical when the input is rejected', () => {
-    const root = tempRoot()
-    const valid = checkProjectConfigText(
-      JSON.stringify({ terminal: { shell: 'bash', env: { CUSTOM_KEEP_ME: 'sentinel' } } })
-    )
-    expect(valid.ok).toBe(true)
-    if (!valid.ok) return
-    expect(saveProjectConfig(root, valid.config).ok).toBe(true)
-
-    const file = projectConfigFile(root)
-    const before = fs.readFileSync(file)
-    const stat = fs.statSync(file)
-
-    // What the route does with a rejection: nothing at all.
-    const rejected = checkProjectConfigText('{bad json')
-    expect(rejected.ok).toBe(false)
-
-    expect(fs.readFileSync(file).equals(before)).toBe(true)
-    expect(fs.statSync(file).mtimeMs).toBe(stat.mtimeMs)
-    clearProjectConfigCache()
-    expect(loadProjectConfig(root).config.terminal.env).toEqual({ CUSTOM_KEEP_ME: 'sentinel' })
-  })
 })

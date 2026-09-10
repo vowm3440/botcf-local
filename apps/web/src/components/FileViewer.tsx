@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ContentEncoding } from '../api'
-import { clearDraft, getDraft, setDraft as cacheDraft } from '../editor/draftStore'
+import { clearDraft, clearSpilledDraft, getDraft, restoreRecoveredDraft, restoreSpilledDraft, setDraft as cacheDraft, type FileDraft } from '../editor/draftStore'
 import { draftAction, isDirty, type BufferShape } from '../editor/draftPolicy'
 import { getViewerState, rememberViewerState } from '../editor/viewerState'
 import { countLines } from '../editor/lineCount'
@@ -73,11 +73,17 @@ export default function FileViewer({ path, diff, onClose }: FileViewerProps) {
   /** The document handed *to* the editor: a restored draft on mount, then only what
    *  replaces it from outside — a disk read, 放弃修改, a save. Typing does not come
    *  back through here, which is the point (see `shape`). */
-  const [seed, setSeed] = useState(() => getDraft(path)?.content ?? '')
+  /** Read once per mount: the live draft, else a spill left by budget eviction.
+   *  Spill content is re-registered below so the dirty marker and the save-time
+   *  mtime conflict check see it exactly like a draft that was never evicted. */
+  const initial = useRef<FileDraft | null>(null)
+  if (initial.current === null) initial.current = getDraft(path) ?? restoreSpilledDraft(path) ?? null
+  const spilledMount = useRef(initial.current !== null && getDraft(path) === undefined)
+  const [seed, setSeed] = useState(() => initial.current?.content ?? '')
   /** The cheap facts about the live buffer, reported per keystroke by the editor.
    *  The text itself stays in the editor until something actually needs it. */
   const [shape, setShape] = useState<BufferShape>(() => {
-    const restored = getDraft(path)?.content ?? ''
+    const restored = initial.current?.content ?? ''
     return { length: restored.length, lines: countLines(restored) }
   })
   const [saving, setSaving] = useState(false)
@@ -96,7 +102,7 @@ export default function FileViewer({ path, diff, onClose }: FileViewerProps) {
   const cursorRef = useRef(remembered.current?.line ?? 1)
   /** True until the first disk read lands, so a restored draft is not treated as
    *  a match against the still-empty snapshot. */
-  const restoredDraft = useRef(getDraft(path) !== undefined)
+  const restoredDraft = useRef(initial.current !== null)
   /** The reading position is restored once, after the first snapshot arrives. */
   const restoredPosition = useRef(false)
 
@@ -157,6 +163,45 @@ export default function FileViewer({ path, diff, onClose }: FileViewerProps) {
     cacheDraft(path, { content, baseMtimeMs: snapshot.mtimeMs })
   }, [path])
 
+  // A draft evicted under the byte budget is recovered from the spill cache on
+  // reopen: re-register it so the dirty marker and draftPolicy treat it as a
+  // draft that was never evicted (its base mtime drives the same conflict path).
+  useEffect(() => {
+    if (!spilledMount.current || !initial.current) return
+    spilledMount.current = false
+    cacheDraft(path, initial.current)
+    restoredDraft.current = true
+    setNotice('已从恢复缓存取回未保存的修改,保存前会检查磁盘冲突')
+  }, [path])
+
+  // The same recovery one layer deeper: after a page reload the in-memory spill
+  // is gone, and the only copy left is in the server's disk recovery log. Ask
+  // once per mount, and only while nothing newer has happened in this viewer —
+  // a live draft or on-screen edits always win over the log.
+  const recoveryChecked = useRef(false)
+  useEffect(() => {
+    if (recoveryChecked.current || initial.current !== null || getDraft(path) !== undefined) return
+    recoveryChecked.current = true
+    let cancelled = false
+    void restoreRecoveredDraft(path).then((recovered) => {
+      if (cancelled || !recovered) return
+      if (getDraft(path) !== undefined || dirtyRef.current) return
+      cacheDraft(path, { content: recovered.content, baseMtimeMs: recovered.baseMtimeMs })
+      restoredDraft.current = true
+      setSeed(recovered.content)
+      setShape({ length: recovered.content.length, lines: countLines(recovered.content) })
+      const moved = recovered.diskMtimeMs !== null && recovered.diskMtimeMs !== recovered.baseMtimeMs
+      setNotice(
+        moved
+          ? '已从恢复日志取回未保存的修改;磁盘文件已被外部修改,保存时会提示冲突'
+          : '已从恢复日志取回未保存的修改,保存前会检查磁盘冲突'
+      )
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [path])
+
   // The draft cache is created the moment the buffer diverges from disk — the ● marker
   // and the tab-eviction keep-set both read it and both have to be right immediately —
   // and its *content* is refreshed only where something will read it: the editor's
@@ -190,7 +235,10 @@ export default function FileViewer({ path, diff, onClose }: FileViewerProps) {
         setShape({ length: res.content.length, lines: countLines(res.content) })
       }
       restoredDraft.current = false
-      if (options?.discard) setNotice(null)
+      if (options?.discard) {
+        clearSpilledDraft(path)
+        setNotice(null)
+      }
       setError(null)
     } catch (e) {
       setData(null)
@@ -252,6 +300,7 @@ export default function FileViewer({ path, diff, onClose }: FileViewerProps) {
     try {
       const res = await api.saveFile({ path, content, baseMtimeMs: data.mtimeMs })
       setData((prev) => (prev ? { ...prev, content, size: res.size, mtimeMs: res.mtimeMs } : prev))
+      clearSpilledDraft(path)
       setNotice('已保存')
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '保存失败')

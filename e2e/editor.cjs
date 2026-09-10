@@ -17,10 +17,9 @@
  *  It also covers the two panels that hand files *to* the editor — the Git panel and
  *  the diagnostics centre — because both have an honest source of state (a git
  *  repository on disk; the endpoint the sandboxed preview page posts runtime errors
- *  to) and both end at the same cross-panel signal the editor listens for. The review
- *  panel is deliberately absent: its state is written only by a real agent turn, and
- *  the only way to fake one is a route that exists for tests, which is exactly what
- *  this harness has refused to add from the start.
+ *  to) and both end at the same cross-panel signal the editor listens for. Review
+ *  uses a local RPC runtime fixture to reach the server's real turn-recording path;
+ *  terminal checks exercise real shell history and session closure.
  *
  *  What was missing was not a different assertion library, it was a real browser. So
  *  this reuses the gate's own bootstrap (harness/app.cjs): the same build, the same
@@ -28,9 +27,9 @@
  *  the same page. The difference is what it does with it — e2e/spec.js asserts rather
  *  than measures, and the run passes only when every check does.
  *
- *  The diff those checks need comes the way the app's own diffs come: as one finished
- *  turn's `files_changed` over the real chat stream, with only the upstream faked
- *  (harness/inject.js). No agent runs here, and nothing in apps/web knows this exists.
+ *  Editor diffs come as `files_changed` over the real chat stream, with the upstream
+ *  faked in the renderer (harness/inject.js). The review check instead sends a turn
+ *  through the server and the local OMP fixture. No remote model is contacted.
  *
  *  Flags: --keep (leave the fixture and scratch data), --json <file> (default
  *  e2e/last-run.json), --show / --no-show, --budget <ms> (also E2E_BUDGET_MS). */
@@ -86,9 +85,13 @@ let stageLog = { last: () => ({ stage: 'not-started' }), at: () => null, stages:
 
 function writeReport(result) {
   try {
+    fs.mkdirSync(path.dirname(REPORT_FILE), { recursive: true })
     fs.writeFileSync(REPORT_FILE, JSON.stringify(result, null, 2) + '\n', 'utf8')
+    log(`written to ${path.relative(REPO, REPORT_FILE)}`)
+    return true
   } catch (error) {
     log(`无法写入 ${path.relative(REPO, REPORT_FILE)}: ${error.message}`)
+    return false
   }
 }
 
@@ -114,7 +117,6 @@ function report(result) {
   log('')
   const passed = result.checks.filter((check) => check.ok === true).length
   log(`editor e2e: ${result.pass ? 'PASS' : 'FAIL'} — ${passed}/${result.checks.length} 项通过`)
-  log(`written to ${path.relative(REPO, REPORT_FILE)}`)
 }
 
 /** The load, and what the app is expected to make of it.
@@ -229,9 +231,9 @@ async function run() {
       // ran has proved nothing.
       pass: checks.length > 0 && checks.every((check) => check.ok === true)
     }
-    writeReport(result)
+    const written = writeReport(result)
     report(result)
-    return result.pass ? 0 : 1
+    return result.pass && written ? 0 : 1
   } finally {
     if (window && !window.isDestroyed()) window.destroy()
   }

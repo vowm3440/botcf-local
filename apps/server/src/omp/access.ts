@@ -1,5 +1,4 @@
 import { getSetting, putSetting } from '../db.js'
-import type { OmpRpcClient } from './rpc.js'
 
 /** Tool-approval mode — the honest scope of "full access".
  *
@@ -75,13 +74,22 @@ export function autoApprovalLabel(msg: Record<string, unknown>): string {
 
 let installed = false
 
+/** What the auto-approver needs of a runtime: event delivery plus the answer
+ *  channel. Both the concrete per-root OmpRpcClient instances and the exported
+ *  ActiveOmpClient facade satisfy it structurally. */
+export interface OmpEventSink {
+  on(event: 'event', listener: (msg: Record<string, unknown>) => void): unknown
+  off(event: 'event', listener: (msg: Record<string, unknown>) => void): unknown
+  sendFrame(frame: Record<string, unknown>): void
+}
+
 /** Answer confirm dialogs for the whole process, once.
  *
  *  Registered before any SSE client can connect, so this listener always runs
  *  ahead of the per-connection forwarders and the run is never left waiting on a
  *  modal that the forwarder decided to skip. Idempotent: route registration can
  *  happen more than once in a test process, and one approver is enough. */
-export function installAutoApproval(client: OmpRpcClient): void {
+export function installAutoApproval(client: OmpEventSink): void {
   if (installed) return
   installed = true
   client.on('event', (msg: Record<string, unknown>) => {

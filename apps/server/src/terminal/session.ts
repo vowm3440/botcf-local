@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { cleanOutputLine } from '../process/ansi.js'
 import { killTree } from '../process/killTree.js'
 import { redact } from '../secure/redact.js'
+import { TranscriptSink } from '../logs/transcripts.js'
 import type { ShellSpec } from './shell.js'
 
 /** One built-in terminal session: a real shell reading commands from stdin, its
@@ -43,6 +44,8 @@ export interface TerminalSessionOptions {
   shell: ShellSpec
   /** Extra environment from the project config; cannot override cwd or PATH. */
   env?: Readonly<Record<string, string>>
+  /** Full plain-text transcript path, when disk persistence is enabled. */
+  transcriptFile?: string
   spawnProcess?: typeof spawn
 }
 
@@ -77,6 +80,7 @@ export class TerminalSession extends EventEmitter {
   private closing = false
   private pending: Record<'stdout' | 'stderr', string> = { stdout: '', stderr: '' }
   private flushTimers: Partial<Record<'stdout' | 'stderr', NodeJS.Timeout>> = {}
+  private transcript: TranscriptSink | null
 
   constructor(private readonly options: TerminalSessionOptions) {
     super()
@@ -85,6 +89,7 @@ export class TerminalSession extends EventEmitter {
     this.rootName = options.rootName
     this.cwd = options.cwd
     this.shell = options.shell
+    this.transcript = options.transcriptFile ? new TranscriptSink(options.transcriptFile) : null
   }
 
   get running(): boolean {
@@ -143,6 +148,8 @@ export class TerminalSession extends EventEmitter {
       })
     } catch (err: unknown) {
       this.push('system', `无法启动 ${this.shell.label}: ${err instanceof Error ? err.message : String(err)}`)
+      this.push('system', `无法启动 ${this.shell.label}: ${err instanceof Error ? err.message : String(err)}`)
+      this.closeTranscript()
       this.exitCode = -1
       this.emit('exit', -1)
       return
@@ -156,12 +163,15 @@ export class TerminalSession extends EventEmitter {
     child.on('error', (err: Error) => {
       this.push('system', `进程错误: ${err.message}`)
     })
-    child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+    // Failed spawns emit error + close, but no exit; close also drains stdio.
+    child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
       this.flush('stdout')
       this.flush('stderr')
       this.child = null
       this.exitCode = code ?? -1
       this.push('system', `会话已结束 (${signal ? `signal=${signal}` : `code=${code ?? 'unknown'}`})`)
+      this.push('system', `会话已结束 (${signal ? `signal=${signal}` : `code=${code ?? 'unknown'}`})`)
+      this.closeTranscript()
       this.emit('exit', this.exitCode)
     })
   }
@@ -215,6 +225,7 @@ export class TerminalSession extends EventEmitter {
     await killTree(child)
     this.child = null
     if (this.exitCode === null) this.exitCode = -1
+    this.closeTranscript()
   }
 
   private consume(stream: NodeJS.ReadableStream | null, kind: 'stdout' | 'stderr'): void {
@@ -246,12 +257,20 @@ export class TerminalSession extends EventEmitter {
     this.push(kind, rest)
   }
 
+  /** Flush and release the transcript file handle once the session ends. */
+  private closeTranscript(): void {
+    this.transcript?.close()
+    this.transcript = null
+  }
+
   private push(kind: TerminalLineKind, raw: string): void {
     const text = redact(cleanOutputLine(raw)).slice(0, MAX_LINE_CHARS)
     // Blank output lines are kept: spacing is part of a transcript.
     const line: TerminalLine = { seq: ++this.seq, at: Date.now(), kind, text }
     this.lastActivityAt = line.at
     this.lines = [...this.lines.slice(-(MAX_TERMINAL_LINES - 1)), line]
+    // The ring buffer drops old lines; the transcript file keeps them all.
+    this.transcript?.append(text)
     this.emit('line', line)
   }
 }

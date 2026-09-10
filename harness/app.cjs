@@ -335,6 +335,8 @@ function createHarness(options) {
     request,
     startServer,
     stopServer,
+    /** Pid of the spawned server child, for perf/workspace.cjs RSS sampling. */
+    serverPid: () => (serverProc ? serverProc.pid : null),
     waitForHealth,
     seedSession,
     addRoot,

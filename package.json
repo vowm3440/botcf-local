@@ -20,7 +20,8 @@
     "perf:editor": "npm run build && electron perf/editor-load.cjs",
     "perf:spread": "npm run build && node perf/spread.cjs",
     "verify": "npm run build && npm test && electron e2e/editor.cjs && electron perf/editor-load.cjs",
-    "start": "npm run start -w apps/server"
+    "start": "npm run start -w apps/server",
+    "perf:workspace": "npm run build && electron perf/workspace.cjs"
   },
   "engines": {
     "node": ">=22"

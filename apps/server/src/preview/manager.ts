@@ -5,7 +5,7 @@ import { redact } from '../secure/redact.js'
 import { DevCommandRunner } from './commandRunner.js'
 import { DetectedProject, PreviewMode, detectProject } from './projectDetect.js'
 import { StaticPreviewServer } from './staticPreview.js'
-import { ReloadKind, WorkdirWatcher } from './watcher.js'
+import { ReloadKind, WatchBatch, WorkdirWatcher } from './watcher.js'
 
 /** Lifecycle owner for the live-preview engine.
  *
@@ -78,6 +78,8 @@ export class PreviewManager extends EventEmitter {
   private logs: PreviewLogLine[] = []
   private staticServer: StaticPreviewServer | null = null
   private watcher: WorkdirWatcher | null = null
+  /** Set while the resource degrader paused this watcher (memory pressure). */
+  private watcherPaused = false
   private runner: DevCommandRunner | null = null
   /** Serializes start/stop so overlapping clicks cannot leak a dev server. */
   private operation: Promise<unknown> = Promise.resolve()
@@ -155,11 +157,16 @@ export class PreviewManager extends EventEmitter {
     this.staticServer = server
 
     const watcher = new WorkdirWatcher(options.workdir)
-    watcher.on('change', ({ kind, paths }: { kind: ReloadKind; paths: string[] }) => {
+    watcher.on('change', (batch: WatchBatch) => {
+      const { kind, paths, rescan } = batch
       server.broadcast(kind)
       this.patch({ lastReloadAt: Date.now(), lastReloadKind: kind })
-      this.emit('reload', { kind, paths, at: Date.now() })
-      this.log(`${kind === 'css' ? '样式热更新' : '重新加载'}: ${paths.slice(0, 6).join(', ')}${paths.length > 6 ? ` 等 ${paths.length} 项` : ''}`)
+      this.emit('reload', { kind, paths, rescan, at: Date.now() })
+      if (rescan) {
+        this.log('监听事件过多,已触发一次全量刷新(rescan)')
+      } else {
+        this.log(`${kind === 'css' ? '样式热更新' : '重新加载'}: ${paths.slice(0, 6).join(', ')}${paths.length > 6 ? ` 等 ${paths.length} 项` : ''}`)
+      }
     })
     watcher.on('error', (message: string) => {
       this.log(`监听告警: ${message}`)
@@ -223,6 +230,21 @@ export class PreviewManager extends EventEmitter {
     return this.getState()
   }
 
+  /** Pause the reload watcher (resource degrader, memory pressure). Idempotent:
+   *  a command-mode preview has no watcher, and a later start() re-creates it. */
+  pauseWatch(): void {
+    if (!this.watcher) return
+    this.watcher.stop()
+    this.watcherPaused = true
+  }
+
+  /** Resume the reload watcher after pressure passes; no-op unless paused. */
+  resumeWatch(): void {
+    if (!this.watcherPaused || !this.watcher) return
+    this.watcherPaused = false
+    if (this.state.running) this.watcher.start()
+  }
+
   async stop(): Promise<PreviewState> {
     return this.enqueue(async () => {
       const wasRunning = this.state.phase !== 'stopped'
@@ -238,6 +260,7 @@ export class PreviewManager extends EventEmitter {
     this.runner = null
     this.watcher?.stop()
     this.watcher = null
+    this.watcherPaused = false
     const server = this.staticServer
     this.staticServer = null
     if (runner) {

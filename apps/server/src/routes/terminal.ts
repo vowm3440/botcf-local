@@ -1,5 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import fs from 'node:fs'
+import { config } from '../config.js'
+import { transcriptFile } from '../logs/transcripts.js'
 import { loadProjectConfig } from '../projectConfig/store.js'
 import { terminalRegistry } from '../terminal/registry.js'
 import type { TerminalLine } from '../terminal/session.js'
@@ -52,6 +54,20 @@ export function registerTerminalRoutes(app: FastifyInstance): void {
     })
     if (!created.ok) return reply.code(created.status).send({ success: false, error: created.error })
     return { success: true, session: created.session.info(), lines: created.session.snapshot() }
+  })
+
+  /** Full plain-text transcript of a session. The ring buffer keeps at most
+   *  MAX_TERMINAL_LINES lines; the disk copy behind this endpoint has them all. */
+  app.get<{ Params: { id: string } }>('/api/terminal/sessions/:id/log', async (req, reply) => {
+    const session = terminalRegistry.get(req.params.id)
+    if (!session) return reply.code(404).send({ success: false, error: '终端会话不存在' })
+    const file = transcriptFile(config.dataDir, 'terminals', session.rootId, req.params.id)
+    try {
+      const text = fs.readFileSync(file, 'utf8')
+      return reply.type('text/plain; charset=utf-8').send(text)
+    } catch {
+      return reply.code(404).send({ success: false, error: '完整日志不存在(该会话没有输出或日志未启用)' })
+    }
   })
 
   /** Transcript catch-up: `after` is the last sequence number already rendered. */

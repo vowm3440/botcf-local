@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { Readable } from 'node:stream'
 import { appState, applyActiveRouteToOmp, persistBotcfSession, clearBotcfSession, persistRoute, isAuthenticated, setThirdParty, getThirdPartyKey } from '../appState.js'
-import { BotcfError, BotcfLogItem, LogQuery } from '../botcf/adapter.js'
+import { BotcfClient, BotcfError, BotcfLogItem, LogQuery } from '../botcf/adapter.js'
 import { ensureDedicatedKey, discoverGroups } from '../botcf/keys.js'
 import { classifyGroup, isSelectableModel, supportedThinkingLevels, modelMatchesGroup, normalizeBaseUrl, parseModelList, thirdPartyApiType, THIRD_PARTY_GROUP, THIRD_PARTY_THINKING_LEVELS } from '../catalog/routing.js'
 import { extractPricingGroups, extractSelfGroups, getSiteCatalog, listUserGroups, mergeGroups, modelAllowedInGroup } from '../catalog/groupCatalog.js'
@@ -202,14 +202,20 @@ export function registerApiRoutes(app: FastifyInstance): void {
       const { mode, username, password, token } = req.body ?? ({} as never)
       if (mode === 'password') {
         if (!username || !password) return reply.code(400).send({ success: false, error: '缺少用户名或密码' })
-        const user = await appState.botcf.loginWithPassword(username, password)
+        const client = new BotcfClient()
+        const user = await client.loginWithPassword(username, password)
+        clearBotcfSession()
+        appState.botcf = client
         persistBotcfSession()
         const qpu = await getQuotaPerUnit()
         return { success: true, user: sanitizeUser(await appState.botcf.self().catch(() => user), qpu) }
       }
       if (mode === 'token') {
         if (!token) return reply.code(400).send({ success: false, error: '缺少管理 Token' })
-        const user = await appState.botcf.loginWithAccessToken(token.trim())
+        const client = new BotcfClient()
+        const user = await client.loginWithAccessToken(token.trim())
+        clearBotcfSession()
+        appState.botcf = client
         persistBotcfSession()
         return { success: true, user: sanitizeUser(user, await getQuotaPerUnit()) }
       }
@@ -235,7 +241,6 @@ export function registerApiRoutes(app: FastifyInstance): void {
 
   app.post('/api/auth/logout', async () => {
     clearBotcfSession()
-    setActiveRoute(null)
     return { success: true }
   })
 

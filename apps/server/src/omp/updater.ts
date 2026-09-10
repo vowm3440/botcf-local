@@ -425,7 +425,17 @@ export class OmpUpdater extends EventEmitter {
       this.consecutiveFailures++
       if (shouldRollback(this.consecutiveFailures, 1)) {
         const rolledBack = await this.rollback()
-        const restored = rolledBack && await this.hooks.healthProbe().catch(() => false)
+        if (!rolledBack) {
+          // A failed first installation has no known-good version to restore.
+          // Do not leave it marked current: the next check would otherwise
+          // skip the same release and silently clear the startup failure.
+          await fsp.rm(currentLink(), { recursive: true, force: true })
+          this.state.currentVersion = null
+          await this.persist()
+          this.emitUpdate('error', version, this.state.lastError)
+          return
+        }
+        const restored = await this.hooks.healthProbe().catch(() => false)
         if (!restored) this.state.lastError = `${this.state.lastError}; 旧版本恢复验证失败`
         await this.persist()
         return

@@ -1,3 +1,4 @@
+import type { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
@@ -96,6 +97,23 @@ describe('DevCommandRunner', () => {
     expect(exited).toBe(true)
     expect(logs[0]).toContain('ENOENT npm')
     expect(runner.running).toBe(false)
+  })
+
+  it('notifies the preview manager when an asynchronous spawn fails without exit', () => {
+    const child = new FakeDevServer()
+    const runner = new DevCommandRunner({
+      cwd: '/tmp/project',
+      packageManager: 'npm',
+      script: 'dev',
+      spawnProcess: (() => child) as unknown as typeof spawn
+    })
+    const exited = vi.fn()
+    runner.on('exit', exited)
+    runner.start()
+    child.emit('error', new Error('spawn ENOENT'))
+    child.emit('close', -2, null)
+    expect(runner.running).toBe(false)
+    expect(exited).toHaveBeenCalledExactlyOnceWith(-2)
   })
 
   it('exposes the command line it will run', () => {

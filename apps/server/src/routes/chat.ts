@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyReply } from 'fastify'
 import fs from 'node:fs'
 import path from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { request as undiciRequest } from 'undici'
 import { appState, applyActiveRouteToOmp, isAuthenticated } from '../appState.js'
 import { config } from '../config.js'
@@ -62,29 +63,28 @@ export function buildUpstreamRequest(apiType: 'chat' | 'responses' | 'messages',
 /** Normalize one upstream SSE data payload into {text?, inputTokens?, outputTokens?}. */
 export function extractDelta(payload: Record<string, unknown>): { text?: string; inputTokens?: number; outputTokens?: number } {
   // OpenAI chat completions
+  const result: { text?: string; inputTokens?: number; outputTokens?: number } = {}
   const choices = payload.choices as Array<{ delta?: { content?: string } }> | undefined
-  if (choices?.[0]?.delta?.content) return { text: choices[0].delta.content }
+  if (choices?.[0]?.delta?.content) result.text = choices[0].delta.content
 
   // OpenAI Responses API
   if (typeof payload.delta === 'string' && (payload.type as string | undefined)?.includes('output_text')) {
-    return { text: payload.delta }
+    result.text = payload.delta
   }
 
   // Anthropic messages
   const delta = payload.delta as { text?: string } | undefined
-  if ((payload.type === 'content_block_delta') && delta?.text) return { text: delta.text }
+  if ((payload.type === 'content_block_delta') && delta?.text) result.text = delta.text
 
   // usage: several shapes
   const usage = (payload.usage ?? (payload.response as { usage?: unknown } | undefined)?.usage ?? (payload.message as { usage?: unknown } | undefined)?.usage) as
     | { prompt_tokens?: number; completion_tokens?: number; input_tokens?: number; output_tokens?: number }
     | undefined
   if (usage) {
-    return {
-      inputTokens: usage.prompt_tokens ?? usage.input_tokens,
-      outputTokens: usage.completion_tokens ?? usage.output_tokens
-    }
+    result.inputTokens = usage.prompt_tokens ?? usage.input_tokens
+    result.outputTokens = usage.completion_tokens ?? usage.output_tokens
   }
-  return {}
+  return result
 }
 
 async function streamDirect(reply: FastifyReply, messages: ChatMessage[]): Promise<void> {
@@ -113,28 +113,50 @@ async function streamDirect(reply: FastifyReply, messages: ChatMessage[]): Promi
   }
 
   let buffer = ''
+  const decoder = new StringDecoder('utf8')
   let sawUsage = false
-  for await (const chunk of upstream.body) {
-    buffer += chunk.toString()
-    let idx: number
-    while ((idx = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, idx).trim()
-      buffer = buffer.slice(idx + 1)
-      if (!line.startsWith('data:')) continue
-      const data = line.slice(5).trim()
-      if (data === '[DONE]') continue
-      try {
-        const parsed = extractDelta(JSON.parse(data))
-        if (parsed.text) sseWrite(reply, { type: 'delta', text: parsed.text })
-        if (parsed.inputTokens !== undefined || parsed.outputTokens !== undefined) {
-          sawUsage = true
-          sseWrite(reply, { type: 'usage', inputTokens: parsed.inputTokens ?? 0, outputTokens: parsed.outputTokens ?? 0 })
-        }
-      } catch {
-        /* partial JSON across chunks is handled by line buffering; ignore stray lines */
-      }
+  let inputTokens = 0
+  let outputTokens = 0
+  const consumeLine = (line: string): void => {
+    if (!line.startsWith('data:')) return
+    const data = line.slice(5).trim()
+    if (!data || data === '[DONE]') return
+    let payload: Record<string, unknown>
+    try {
+      payload = JSON.parse(data)
+    } catch {
+      return
+    }
+    // Providers can report failures after the successful HTTP headers.
+    if (payload.error || payload.type === 'response.failed') {
+      const carrier = payload.type === 'response.failed'
+        ? (payload.response as Record<string, unknown> | undefined) ?? payload
+        : payload
+      throw new Error(errorDetail(carrier).message || '上游流式请求失败')
+    }
+    const parsed = extractDelta(payload)
+    if (parsed.text) sseWrite(reply, { type: 'delta', text: parsed.text })
+    if (parsed.inputTokens !== undefined || parsed.outputTokens !== undefined) {
+      sawUsage = true
+      const nextInput = parsed.inputTokens ?? inputTokens
+      const nextOutput = parsed.outputTokens ?? outputTokens
+      // The UI adds usage events, just as it does for the OMP path. Providers
+      // report cumulative turn totals, so emit only the newly observed tokens.
+      sseWrite(reply, { type: 'usage', inputTokens: nextInput - inputTokens, outputTokens: nextOutput - outputTokens })
+      inputTokens = nextInput
+      outputTokens = nextOutput
     }
   }
+  for await (const chunk of upstream.body) {
+    buffer += decoder.write(chunk)
+    let idx: number
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      consumeLine(buffer.slice(0, idx).trim())
+      buffer = buffer.slice(idx + 1)
+    }
+  }
+  buffer += decoder.end()
+  if (buffer.trim()) consumeLine(buffer.trim())
 
   // One real successful request on a documented route upgrades it to verified.
   if (cap && cap.confidence === 'documented') {
@@ -657,6 +679,9 @@ export function registerChatRoutes(app: FastifyInstance): void {
     if (!appState.route) {
       return reply.code(409).send({ success: false, error: '请先选择分组和模型' })
     }
+    if (appState.generationInFlight) {
+      return reply.code(409).send({ success: false, error: '生成进行中,请先中止当前回答' })
+    }
     const messages = req.body?.messages
     if (!Array.isArray(messages) || messages.length === 0) {
       return reply.code(400).send({ success: false, error: 'messages 不能为空' })
@@ -693,12 +718,49 @@ export function registerChatRoutes(app: FastifyInstance): void {
     return { success: true }
   })
 
-  /** OMP owns the durable session history; drain the paged endpoint so the UI
-   *  can restore the conversation after a reload or restart. */
-  app.get('/api/chat/history', async (req, reply) => {
-    if (!ompClient.running) return { success: true, source: 'local', messages: [] }
+  /** OMP owns the durable session history; expose OMP's paged endpoint so the
+   *  UI can restore the conversation after a reload or restart. With `cursor`
+   *  or `limit` this returns one bounded page plus totalMessages/nextCursor;
+   *  the legacy no-parameter call drains up to 40 pages for callers that want
+   *  the whole transcript in one response. */
+  app.get<{ Querystring: { cursor?: string; limit?: string } }>('/api/chat/history', async (req, reply) => {
+    const rawCursor = req.query?.cursor
+    const rawLimit = req.query?.limit
+    if (rawCursor !== undefined && (typeof rawCursor !== 'string' || rawCursor.length === 0 || rawCursor.length > 4096)) {
+      return reply.code(400).send({ success: false, error: 'cursor 无效' })
+    }
+    let limit: number | undefined
+    if (rawLimit !== undefined) {
+      limit = Number(rawLimit)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 256) {
+        return reply.code(400).send({ success: false, error: 'limit 需为 1-256 的整数' })
+      }
+    }
+    const paged = rawCursor !== undefined || limit !== undefined
+    if (!ompClient.running) {
+      return paged
+        ? { success: true, source: 'local', messages: [], totalMessages: 0, nextCursor: undefined }
+        : { success: true, source: 'local', messages: [] }
+    }
+    const pageParams: Record<string, number | string> = {}
+    if (rawCursor) pageParams.cursor = rawCursor
+    if (limit) pageParams.limit = limit
     const collected: Array<{ role: string; content: string }> = []
     try {
+      if (paged) {
+        const data = await ompClient.call<{ messages?: unknown[]; totalMessages?: number; nextCursor?: string }>(
+          'get_messages_page',
+          pageParams
+        )
+        for (const m of data.messages ?? []) collected.push(...normalizeAgentMessage(m))
+        return {
+          success: true,
+          source: 'omp',
+          messages: collected,
+          totalMessages: data.totalMessages,
+          nextCursor: data.nextCursor
+        }
+      }
       let cursor: string | undefined
       for (let page = 0; page < 40; page++) {
         const data = await ompClient.call<{ messages?: unknown[]; nextCursor?: string }>(
@@ -710,7 +772,7 @@ export function registerChatRoutes(app: FastifyInstance): void {
         cursor = data.nextCursor
       }
     } catch (err: unknown) {
-      // session_busy while streaming/compacting — the client just keeps local state.
+      // session_busy while streaming/compacting; the client just keeps local state.
       return reply.code(409).send({ success: false, error: redact(err instanceof Error ? err.message : String(err)) })
     }
     return { success: true, source: 'omp', messages: collected }

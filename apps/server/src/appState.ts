@@ -73,13 +73,16 @@ export function clearBotcfSession(): void {
   appState.botcf = new BotcfClient()
   appState.thirdParty = null
   appState.route = null
+  setActiveRoute(null)
   resetSiteCatalog()
   resetSiteStatus()
 }
 
 /** Persist the third-party provider (key sealed) and activate the mode. */
 export function setThirdParty(info: { baseUrl: string; models: string[]; apiKey: string }): void {
-  putSecret(THIRD_PARTY_SECRET, seal(JSON.stringify(info)))
+  const sealed = seal(JSON.stringify(info))
+  clearBotcfSession()
+  putSecret(THIRD_PARTY_SECRET, sealed)
   appState.thirdParty = { baseUrl: info.baseUrl, models: info.models }
 }
 

@@ -6,6 +6,7 @@ import { readyDurationStats } from '../omp/startupBudget.js'
 import { restartRuntime } from '../omp/runtime.js'
 import { autoApprovalLabel, getAccessMode, installAutoApproval, setAccessMode, shouldAutoApprove, type AccessMode } from '../omp/access.js'
 import { workspacePayload } from './workspace.js'
+import { rootRuntime } from '../workspace/rootRuntime.js'
 import { addRootToWorkspace } from '../workspace/service.js'
 
 export function registerOmpRoutes(app: FastifyInstance, updater: OmpUpdater): void {
@@ -77,7 +78,10 @@ export function registerOmpRoutes(app: FastifyInstance, updater: OmpUpdater): vo
         return
       }
       if (t === 'extension_ui_request' || t === 'extension_error' || t === 'notice' || t === 'host_tool_call') {
-        reply.raw.write(`data: ${JSON.stringify(msg)}\n\n`)
+        // Events always originate from the active root's runtime; carrying the
+        // id lets a multi-window UI attribute dialogs/notices to the project.
+        const rooted = { ...msg, rootId: rootRuntime.snapshot().activeRootId }
+        reply.raw.write(`data: ${JSON.stringify(rooted)}\n\n`)
       }
     }
     const forwardUpdate = (event: OmpUpdateEvent): void => {

@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyReply } from 'fastify'
 import { workspaceRootInfos, type WorkspaceRootInfo } from '../workspace/locate.js'
-import { MAX_WORKSPACE_ROOTS, primaryRoot } from '../workspace/model.js'
+import { MAX_WORKSPACE_ROOTS, primaryRoot, rootById } from '../workspace/model.js'
+import { rootRuntime, type RootRuntimeSnapshot } from '../workspace/rootRuntime.js'
 import {
   addRootToWorkspace,
   removeRootFromWorkspace,
@@ -24,16 +25,21 @@ export interface WorkspacePayload {
   /** Primary root path, i.e. OMP's cwd — the field the UI has always polled. */
   workdir: string | null
   maxRoots: number
+  /** Per-root lifecycle (cold/restoring/active/background + pin + pool state). */
+  runtime: RootRuntimeSnapshot
 }
 
 export function workspacePayload(): WorkspacePayload {
   const workspace = getWorkspace()
+  const runtime = rootRuntime.snapshot()
+  const runtimeById = new Map(runtime.roots.map((entry) => [entry.rootId, entry]))
   return {
     success: true,
-    roots: workspaceRootInfos(workspace),
+    roots: workspaceRootInfos(workspace, runtimeById),
     primaryId: workspace.primaryId,
     workdir: primaryRoot(workspace)?.path ?? null,
-    maxRoots: MAX_WORKSPACE_ROOTS
+    maxRoots: MAX_WORKSPACE_ROOTS,
+    runtime
   }
 }
 
@@ -61,6 +67,22 @@ function sendMutation(reply: FastifyReply, result: WorkspaceMutationResult): Wor
 
 export function registerWorkspaceRoutes(app: FastifyInstance): void {
   app.get('/api/workspace', async () => workspacePayload())
+
+  /** Lifecycle snapshot: which roots are active / background / cold, whether
+   *  their runtimes are running, and how many pool slots are in use. */
+  app.get('/api/workspace/runtime', async () => ({ success: true, ...rootRuntime.snapshot() }))
+
+  /** Pin (or unpin) a root so its OMP session is never recycled by the idle
+   *  sweep. Pinning more roots than the pool capacity is what makes a later
+   *  activation queue instead of spawning. */
+  app.post<{ Body: { id?: string; pinned?: boolean } }>('/api/workspace/runtime/pin', async (req, reply) => {
+    const id = typeof req.body?.id === 'string' ? req.body.id.trim() : ''
+    const pinned = req.body?.pinned === true
+    if (!id) return reply.code(400).send({ success: false, error: '缺少目录 id' })
+    if (!rootById(getWorkspace(), id)) return reply.code(404).send({ success: false, error: '工作区中没有这个目录' })
+    rootRuntime.setPinned(id, pinned)
+    return workspacePayload()
+  })
 
   /** Open a directory as a root. Idempotent; `primary` also makes it the cwd. */
   app.post<{ Body: { path?: string; name?: string; primary?: boolean } }>('/api/workspace/roots', async (req, reply) => {

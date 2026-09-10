@@ -55,6 +55,15 @@ export function isBackgroundScript(script: string): boolean {
   return classifyScript(script) === 'run'
 }
 
+/** Heavy kinds (build/test) serialize: they take the whole task pool, so a
+ *  compile cannot fight a test run for CPU. Kept next to the kind rules so the
+ *  scheduler and the UI see the same classification. */
+export const HEAVY_TASK_KINDS: ReadonlySet<TaskKind> = new Set(['build', 'test'])
+
+export function isHeavyTask(kind: TaskKind): boolean {
+  return HEAVY_TASK_KINDS.has(kind)
+}
+
 function definitionFromConfig(task: ProjectTaskConfig, packageManager: PackageManager): TaskDefinition | null {
   const base = {
     id: `config:${task.name}`,

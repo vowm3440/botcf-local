@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { cleanOutputLine } from '../process/ansi.js'
 import { killTree } from '../process/killTree.js'
 import { redact } from '../secure/redact.js'
+import { TranscriptSink } from '../logs/transcripts.js'
 
 /** One task execution: a child process, its captured output and its verdict.
  *
@@ -15,7 +16,7 @@ import { redact } from '../secure/redact.js'
  *  Output is a bounded ring buffer with monotonic sequence numbers, so a panel can
  *  attach late or reconnect and resume exactly where it stopped. */
 
-export type TaskRunState = 'running' | 'succeeded' | 'failed' | 'stopped'
+export type TaskRunState = 'queued' | 'running' | 'succeeded' | 'failed' | 'stopped'
 
 export interface TaskLogLine {
   seq: number
@@ -41,6 +42,8 @@ export interface TaskRunOptions {
   env?: Readonly<Record<string, string>>
   background: boolean
   commandLine: string
+  /** Full plain-text transcript path, when disk persistence is enabled. */
+  transcriptFile?: string
   spawnProcess?: typeof spawn
 }
 
@@ -72,20 +75,27 @@ export class TaskRun extends EventEmitter {
   private child: ChildProcess | null = null
   private lines: TaskLogLine[] = []
   private seq = 0
-  private state: TaskRunState = 'running'
+  private state: TaskRunState = 'queued'
   private exitCode: number | null = null
   private endedAt: number | null = null
   private pending: Record<'stdout' | 'stderr', string> = { stdout: '', stderr: '' }
   private problems = 0
+  private transcript: TranscriptSink | null
 
   constructor(private readonly options: TaskRunOptions) {
     super()
     this.id = options.id
     this.taskId = options.taskId
+    this.transcript = options.transcriptFile ? new TranscriptSink(options.transcriptFile) : null
   }
 
   get running(): boolean {
     return this.state === 'running'
+  }
+
+  /** True until the manager hands the run a slot and start() is called. */
+  get queued(): boolean {
+    return this.state === 'queued'
   }
 
   info(): TaskRunInfo {
@@ -122,7 +132,9 @@ export class TaskRun extends EventEmitter {
   }
 
   start(): void {
-    if (this.child) return
+    if (this.child || this.state !== 'queued') return
+    // Deferred spawn: a manager may queue a run behind a heavy one.
+    this.state = 'running'
     const spawnProcess = this.options.spawnProcess ?? spawn
     const isWindows = process.platform === 'win32'
     this.push('system', `$ ${this.options.commandLine}  (cwd=${this.options.cwd})`)
@@ -157,7 +169,9 @@ export class TaskRun extends EventEmitter {
     this.consume(child.stdout, 'stdout')
     this.consume(child.stderr, 'stderr')
     child.on('error', (err: Error) => this.push('system', `进程错误: ${err.message}`))
-    child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+    // `close` follows drained stdio and also fires after an asynchronous spawn
+    // failure, where Node never emits `exit`.
+    child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
       this.flush('stdout')
       this.flush('stderr')
       this.child = null
@@ -176,7 +190,8 @@ export class TaskRun extends EventEmitter {
   async stop(): Promise<void> {
     const child = this.child
     if (!child) {
-      if (this.state === 'running') this.finish('stopped', null)
+      // A run that never got a slot is stopped without spawning a process.
+      if (this.state === 'queued') this.finish('stopped', null)
       return
     }
     this.push('system', '正在停止…')
@@ -188,6 +203,8 @@ export class TaskRun extends EventEmitter {
   }
 
   private finish(state: TaskRunState, code: number | null): void {
+    this.transcript?.close()
+    this.transcript = null
     this.state = state
     this.exitCode = code
     this.endedAt = Date.now()
@@ -216,6 +233,8 @@ export class TaskRun extends EventEmitter {
     const text = redact(cleanOutputLine(raw)).slice(0, MAX_LINE_CHARS)
     const line: TaskLogLine = { seq: ++this.seq, at: Date.now(), stream, text }
     this.lines = [...this.lines.slice(-(MAX_RUN_LINES - 1)), line]
+    // The ring buffer drops old lines; the transcript file keeps them all.
+    this.transcript?.append(text)
     this.emit('line', line)
   }
 }

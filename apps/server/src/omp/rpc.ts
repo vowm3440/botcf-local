@@ -5,6 +5,7 @@ import path from 'node:path'
 import readline from 'node:readline'
 import { config } from '../config.js'
 import { getDb } from '../db.js'
+import { killTree } from '../process/killTree.js'
 import { ompStartupBudget, recordReadyDuration, type StartupBudget } from './startupBudget.js'
 
 /** oh-my-pi RPC wire contract (docs/rpc.md, verified against v17.3.x):
@@ -30,6 +31,15 @@ interface Pending {
   reject: (e: Error) => void
   timer: NodeJS.Timeout
 }
+
+/** Ceiling on in-flight calls awaiting a response frame. Beyond this, `call`
+ *  refuses immediately instead of letting an unresponsive OMP pile requests. */
+export const MAX_RPC_PENDING = 256
+
+/** Largest outbound frame we will put on the wire (UTF-8 bytes). Frames over
+ *  this are dropped and reported on stderr; a single oversized write would
+ *  otherwise defeat every backpressure guard below. */
+export const MAX_RPC_FRAME_BYTES = 4 * 1024 * 1024
 
 export interface OmpRpcClientOptions {
   spawnProcess?: typeof spawn
@@ -172,6 +182,9 @@ export class OmpRpcClient extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null
   private nextId = 1
   private pending = new Map<string, Pending>()
+  /** Serialized stdin writes: one frame at a time, waiting for `drain` when the
+   *  pipe is full, so a burst never stacks unbounded buffered bytes. */
+  private writeChain: Promise<void> = Promise.resolve()
   private readyWaiters = new Set<ReadyWaiter>()
   private isReady = false
   /** Monotonic timestamp of the last spawn, for the spawn → ready measurement. */
@@ -233,6 +246,7 @@ export class OmpRpcClient extends EventEmitter {
   async start(): Promise<boolean> {
     if (this.child && this.child.exitCode === null) return true
     if (!this.available) return false
+    this.writeChain = Promise.resolve()
     const syncModels = this.options.syncModelsConfig ?? syncBotcfModelsConfig
     syncModels()
 
@@ -253,12 +267,25 @@ export class OmpRpcClient extends EventEmitter {
         ANTHROPIC_API_KEY: config.proxyToken
       },
       stdio: ['pipe', 'pipe', 'pipe'],
+      // POSIX tree kill signals the whole group via a negative pid, which needs
+      // the child to own its own process group (see ../process/killTree.ts).
+      detached: process.platform !== 'win32',
       cwd: this.workdir && fs.existsSync(this.workdir) ? this.workdir : undefined
     })
     this.child = child as ChildProcessWithoutNullStreams
 
-    readline.createInterface({ input: this.child.stdout }).on('line', (line) => this.onLine(line))
-    readline.createInterface({ input: this.child.stderr }).on('line', (line) => this.emit('stderr', line))
+    // A dying process can EPIPE a queued write; without a listener that would
+    // surface as an uncaught exception and take the whole app down with it.
+    child.stdin.on('error', () => undefined)
+
+    // Pipes can still drain after exit (or after stop gave up waiting). Frames
+    // from a retired process must not mark its replacement ready or show dialogs.
+    readline.createInterface({ input: child.stdout }).on('line', (line) => {
+      if (this.child === child) this.onLine(line)
+    })
+    readline.createInterface({ input: child.stderr }).on('line', (line) => {
+      if (this.child === child) this.emit('stderr', line)
+    })
 
     child.on('error', (err) => {
       if (this.child !== child) return
@@ -290,26 +317,34 @@ export class OmpRpcClient extends EventEmitter {
     this.failReadyWaiters(new Error('OMP 进程已停止'))
     if (!child || child.exitCode !== null) return
 
+    if (typeof child.pid === 'number') {
+      // OMP 起的工具子进程必须随 stop() 一起退出:只杀直接子进程会在 Windows
+      // 上留下持有端口和文件句柄的孙进程(killTree 的职责)。
+      await killTree(child)
+      return
+    }
+    // The spawnProcess seam lets tests inject process doubles without a real OS
+    // pid, and killTree returns without signalling those. Give them the same
+    // single-process kill so stop() is total for doubles too.
     await new Promise<void>((resolve) => {
-      let forceTimer: NodeJS.Timeout | null = null
-      let giveUpTimer: NodeJS.Timeout | null = null
       let settled = false
       const finish = (): void => {
         if (settled) return
         settled = true
-        if (forceTimer) clearTimeout(forceTimer)
-        if (giveUpTimer) clearTimeout(giveUpTimer)
         child.off('exit', finish)
         child.off('error', finish)
         resolve()
       }
       child.once('exit', finish)
       child.once('error', finish)
-      try { child.kill() } catch { finish(); return }
-      forceTimer = setTimeout(() => {
-        try { child.kill('SIGKILL') } catch { /* process may already be gone */ }
-        giveUpTimer = setTimeout(finish, 1_000)
-      }, 2_000)
+      try {
+        child.kill()
+      } catch {
+        finish()
+        return
+      }
+      const giveUp = setTimeout(finish, 1_000)
+      giveUp.unref?.()
     })
   }
 
@@ -391,18 +426,65 @@ export class OmpRpcClient extends EventEmitter {
     this.emit('event', msg)
   }
 
+  /** Queue one JSON-line frame for the child's stdin. Writes are serialized and
+   *  a frame whose write() returned false waits for `drain` (or the child going
+   *  away) before the next frame is attempted, so a fast caller cannot stack
+   *  unbounded buffered bytes in the pipe. The promise rejects when the child
+   *  is gone or its stdin is closed. */
+  private writeFrame(frame: string): Promise<void> {
+    const next = this.writeChain.then(() => {
+      const child = this.child
+      if (!child || child.exitCode !== null) throw new Error('OMP RPC 未运行')
+      if (!child.stdin.writable) throw new Error('OMP RPC stdin 已关闭')
+      if (child.stdin.write(frame)) return
+      return new Promise<void>((resolve) => {
+        let settled = false
+        const finish = (): void => {
+          if (settled) return
+          settled = true
+          child.stdin.off('drain', finish)
+          child.off('exit', finish)
+          child.off('error', finish)
+          resolve()
+        }
+        child.stdin.once('drain', finish)
+        child.once('exit', finish)
+        child.once('error', finish)
+      })
+    })
+    // One failed frame must not wedge every later writer: the chain continues
+    // with the rejection swallowed, while the caller still sees it.
+    this.writeChain = next.catch(() => undefined)
+    return next
+  }
+
   async call<T = unknown>(type: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
     if (!this.child || this.child.exitCode !== null) throw new Error('OMP RPC 未运行')
+    if (this.pending.size >= MAX_RPC_PENDING) {
+      const error = new Error(`OMP RPC 请求堆积: ${this.pending.size} 个未响应,已拒绝 ${type}`)
+      this.emit('stderr', error.message)
+      throw error
+    }
     const ceiling = timeoutMs ?? this.budget().callMs
     const id = `req_${this.nextId++}`
     const payload = JSON.stringify({ id, type, ...params })
+    const bytes = Buffer.byteLength(payload, 'utf8')
+    if (bytes > MAX_RPC_FRAME_BYTES) {
+      const error = new Error(`OMP RPC 帧过大: ${type} ${bytes} 字节,上限 ${MAX_RPC_FRAME_BYTES}`)
+      this.emit('stderr', error.message)
+      throw error
+    }
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error(`OMP RPC 超时: ${type}`))
       }, ceiling)
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer })
-      this.child!.stdin.write(payload + '\n')
+      this.writeFrame(payload + '\n').catch((error) => {
+        this.pending.delete(id)
+        clearTimeout(timer)
+        reject(error)
+      })
     })
   }
 
@@ -410,7 +492,16 @@ export class OmpRpcClient extends EventEmitter {
    *  extension-UI sub-protocol ({type:"extension_ui_response", ...}). */
   sendFrame(frame: Record<string, unknown>): void {
     if (!this.child || this.child.exitCode !== null) throw new Error('OMP RPC 未运行')
-    this.child.stdin.write(JSON.stringify(frame) + '\n')
+    const payload = JSON.stringify(frame)
+    const bytes = Buffer.byteLength(payload, 'utf8')
+    if (bytes > MAX_RPC_FRAME_BYTES) {
+      const error = new Error(`OMP RPC 帧过大已丢弃: ${String(frame.type ?? '')} ${bytes} 字节`)
+      this.emit('stderr', error.message)
+      return
+    }
+    this.writeFrame(payload + '\n').catch((error) => {
+      this.emit('stderr', error instanceof Error ? error.message : String(error))
+    })
   }
 
   getAvailableModels(): Promise<unknown> {
@@ -475,4 +566,168 @@ export class OmpRpcClient extends EventEmitter {
   }
 }
 
-export const ompClient = new OmpRpcClient()
+/** OMP events the app listens to on whichever root's runtime is active. */
+type ForwardedEvent = 'event' | 'stderr' | 'exit' | 'ready'
+
+/** Facade over the *active root's* OmpRpcClient.
+ *
+ *  Every module that imports `ompClient` keeps working unchanged while the
+ *  per-root pool (workspace/rootRuntime.ts) hands focus between roots: the
+ *  facade simply delegates to the client bound for the active root, forwards its
+ *  events, and refuses calls exactly like a stopped client when no root is
+ *  bound (direct mode). */
+class ActiveOmpClient extends EventEmitter {
+  private active: OmpRpcClient | null = null
+  /** workdir writes that arrive before any client is bound (legacy
+   *  single-directory era); forwarded to the active client once one exists. */
+  private pendingWorkdir: string | null = null
+  private startGate: (() => Promise<boolean>) | null = null
+  private forwarders = new Map<ForwardedEvent, (...args: unknown[]) => void>()
+
+  get running(): boolean {
+    return this.active?.running ?? false
+  }
+
+  get available(): boolean {
+    return this.active?.available ?? false
+  }
+
+  get lastProtocolError(): string | null {
+    return this.active?.lastProtocolError ?? null
+  }
+
+  get lastReadyMs(): number | null {
+    return this.active?.lastReadyMs ?? null
+  }
+
+  get workdir(): string | null {
+    return this.active?.workdir ?? this.pendingWorkdir
+  }
+
+  set workdir(value: string | null) {
+    this.pendingWorkdir = value
+    if (this.active) this.active.workdir = value
+  }
+
+  /** Startup/RPC ceilings of the active runtime; the machine-derived budget
+   *  when no root is bound yet (status endpoints are callable before boot). */
+  budget(): StartupBudget {
+    return this.active ? this.active.budget() : ompStartupBudget()
+  }
+
+  /** Point the facade at another root's client. The previous client's events
+   *  stop forwarding immediately; a parked process that exits later must not
+   *  fail a chat stream that moved on to another root. */
+  bind(client: OmpRpcClient | null): void {
+    if (client === this.active) return
+    for (const [name, forward] of this.forwarders) {
+      this.active?.off(name, forward)
+      client?.on(name, forward)
+    }
+    this.active = client
+    if (client && this.pendingWorkdir !== null && client.workdir === null) client.workdir = this.pendingWorkdir
+  }
+
+  /** Capacity gate consulted before a spawn (see omp/pool.ts). Returning false
+   *  means every slot is held by pinned runtimes — start is refused and the UI
+   *  shows the activation as queued (direct mode until a slot frees). */
+  setStartGate(gate: (() => Promise<boolean>) | null): void {
+    this.startGate = gate
+  }
+
+  /** Register (or return) the forwarder for one event kind. Public so the
+   *  singleton can pre-register all kinds before any client is bound. */
+  forward(name: ForwardedEvent): (...args: unknown[]) => void {
+    let forward = this.forwarders.get(name)
+    if (!forward) {
+      forward = (...args: unknown[]) => this.emit(name, ...(args as unknown[]))
+      this.forwarders.set(name, forward)
+      this.active?.on(name, forward)
+    }
+    return forward
+  }
+
+  async start(): Promise<boolean> {
+    if (!this.active) return false
+    if (this.startGate) {
+      const allowed = await this.startGate()
+      if (!allowed) return false
+    }
+    return this.active.start()
+  }
+
+  async stop(): Promise<void> {
+    await this.active?.stop()
+  }
+
+  handshake(overrides: { readyMs?: number; stateMs?: number } = {}): Promise<boolean> {
+    return this.active ? this.active.handshake(overrides) : Promise.resolve(false)
+  }
+
+  call<T = unknown>(type: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
+    if (!this.active) throw new Error('OMP RPC 未运行')
+    return this.active.call<T>(type, params, timeoutMs)
+  }
+
+  sendFrame(frame: Record<string, unknown>): void {
+    if (!this.active) throw new Error('OMP RPC 未运行')
+    this.active.sendFrame(frame)
+  }
+
+  getAvailableModels(): Promise<unknown> {
+    if (!this.active) throw new Error('OMP RPC 未运行')
+    return this.active.getAvailableModels()
+  }
+
+  setModel(provider: string, modelId: string): Promise<unknown> {
+    if (!this.active) throw new Error('OMP RPC 未运行')
+    return this.active.setModel(provider, modelId)
+  }
+
+  setThinkingLevel(level: string): Promise<unknown> {
+    if (!this.active) throw new Error('OMP RPC 未运行')
+    return this.active.setThinkingLevel(level)
+  }
+
+  getState(): Promise<OmpState> {
+    if (!this.active) throw new Error('OMP RPC 未运行')
+    return this.active.getState()
+  }
+
+  promptMessage(message: string): Promise<{ agentInvoked?: boolean } | undefined> {
+    if (!this.active) throw new Error('OMP RPC 未运行')
+    return this.active.promptMessage(message)
+  }
+
+  smokeTest(provider: string, modelId: string, timeoutMs?: number): Promise<boolean> {
+    if (!this.active) return Promise.resolve(false)
+    return this.active.smokeTest(provider, modelId, timeoutMs)
+  }
+
+  abortGeneration(): Promise<unknown> {
+    if (!this.active) throw new Error('OMP RPC 未运行')
+    return this.active.abortGeneration()
+  }
+}
+
+/** The app-wide client handle. Per-root runtimes swap underneath it; call sites
+ *  that predate the pool keep working against the active root. */
+export const ompClient = new ActiveOmpClient()
+
+/** Point the exported client at the runtime of a specific root (null = direct
+ *  mode). Owned by workspace/rootRuntime.ts. */
+export function setActiveOmpClient(client: OmpRpcClient | null): void {
+  ompClient.bind(client)
+}
+
+/** Install the pool's capacity gate (see ActiveOmpClient#setStartGate). */
+export function setOmpStartGate(gate: (() => Promise<boolean>) | null): void {
+  ompClient.setStartGate(gate)
+}
+
+// Register the forwarders eagerly so events emitted between binds are routed.
+ompClient.forward('event')
+ompClient.forward('stderr')
+ompClient.forward('exit')
+ompClient.forward('ready')
+

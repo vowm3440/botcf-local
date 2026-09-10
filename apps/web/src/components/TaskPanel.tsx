@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import LogPane, { type LogEntry } from './LogPane'
+import { mergeLogLines } from './logLines'
 import RootPicker from './RootPicker'
 import { BUTTON, DANGER_BUTTON, EMPTY_HINT, MONO, PANEL_BODY, PRIMARY_BUTTON, ROW, SCROLL_AREA, STATUS_LINE, TOOLBAR, formatDuration } from './ui'
 import {
@@ -29,6 +30,7 @@ const STREAM_TONE: Record<TaskLogLine['stream'], LogEntry['tone']> = {
 }
 
 const STATE_MARKS: Record<TaskRunInfo['state'], { mark: string; color: string; label: string }> = {
+  queued: { mark: '⏳', color: '#9a6700', label: '排队中' },
   running: { mark: '●', color: '#0969da', label: '运行中' },
   succeeded: { mark: '✓', color: '#1a7f37', label: '成功' },
   failed: { mark: '✗', color: '#cf222e', label: '失败' },
@@ -43,7 +45,6 @@ export default function TaskPanel() {
   const [logs, setLogs] = useState<Record<string, TaskLogLine[]>>({})
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
-  const lastSeq = useRef<Record<string, number>>({})
   const selectedRef = useRef<string | null>(null)
   selectedRef.current = selectedRun
   const rootRef = useRef('')
@@ -51,11 +52,7 @@ export default function TaskPanel() {
   const applyLines = useCallback((runId: string, incoming: readonly TaskLogLine[]) => {
     if (incoming.length === 0) return
     setLogs((prev) => {
-      const known = lastSeq.current[runId] ?? 0
-      const fresh = incoming.filter((line) => line.seq > known)
-      if (fresh.length === 0) return prev
-      lastSeq.current[runId] = fresh[fresh.length - 1].seq
-      return { ...prev, [runId]: [...(prev[runId] ?? []), ...fresh].slice(-1_000) }
+      return { ...prev, [runId]: mergeLogLines(prev[runId] ?? [], incoming, 1_000) }
     })
   }, [])
 
@@ -103,7 +100,7 @@ export default function TaskPanel() {
       const current = selectedRef.current
       if (!current) return
       tasksApi
-        .runLog(current, lastSeq.current[current] ?? 0)
+        .runLog(current)
         .then((result) => applyLines(current, result.lines))
         .catch(() => undefined)
     }
@@ -115,7 +112,6 @@ export default function TaskPanel() {
     try {
       const result = await tasksApi.run({ root: rootId, taskId: task.id })
       setSelectedRun(result.run.id)
-      lastSeq.current[result.run.id] = 0
       applyLines(result.run.id, result.lines)
       setRuns((prev) => [result.run, ...prev.filter((entry) => entry.id !== result.run.id)])
       setNotice(null)
@@ -139,10 +135,8 @@ export default function TaskPanel() {
 
   const selectRun = async (runId: string): Promise<void> => {
     setSelectedRun(runId)
-    if (logs[runId] !== undefined) return
     try {
       const result = await tasksApi.runLog(runId)
-      lastSeq.current[runId] = 0
       applyLines(runId, result.lines)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '任务日志读取失败')
@@ -205,7 +199,7 @@ export default function TaskPanel() {
         )}
         <button
           style={BUTTON}
-          disabled={runs.every((entry) => entry.state === 'running')}
+          disabled={runs.every((entry) => entry.state === 'running' || entry.state === 'queued')}
           title="清空已结束的执行记录及其诊断"
           onClick={() => {
             tasksApi
@@ -264,7 +258,7 @@ export default function TaskPanel() {
                   <span style={{ flex: 'none', fontSize: 10, color: '#8c959f', border: '1px solid #eee', borderRadius: 3, padding: '0 4px' }}>
                     {task.source === 'config' ? '配置' : '脚本'}
                   </span>
-                  {task.run?.state === 'running' ? (
+                  {task.run?.state === 'running' || task.run?.state === 'queued' ? (
                     <>
                       <button style={BUTTON} onClick={() => { selectRun(task.run!.id).catch(() => undefined) }}>
                         查看

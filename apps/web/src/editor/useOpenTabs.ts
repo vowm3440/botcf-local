@@ -11,7 +11,7 @@ import {
   parseStoredTabs,
   serializeTabs
 } from './tabsModel'
-import { clearDraft, draftPaths, draftedPaths, subscribeDrafts } from './draftStore'
+import { clearDraft, draftPaths, draftedPaths, evictStaleDrafts, subscribeDrafts } from './draftStore'
 import { pruneViewerStates } from './viewerState'
 
 /** React binding for the editor tab strip: the pure model plus localStorage
@@ -75,6 +75,10 @@ export function useOpenTabs(storageKey: string): OpenTabsApi {
   // tab set is the last word on which view states are still worth keeping.
   useEffect(() => {
     pruneViewerStates(tabs.paths)
+    // Byte budget for stale drafts: anything not open in a tab is spilled into
+    // the bounded doc cache (and restores on reopen) before its row is dropped,
+    // so retained dirty bytes stay flat regardless of edit volume.
+    evictStaleDrafts(tabs.paths)
   }, [tabs])
 
   const open = useCallback((path: string, options?: { activate?: boolean }) => {

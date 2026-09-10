@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process'
  *     interpreted as a command;
  *   - `--` before user-supplied pathspecs is the caller's job, but every value
  *     that could start with `-` is additionally rejected by git/service.ts;
+ *   - literal pathspecs: a selected filename is never a glob or pathspec magic;
  *   - no credential or editor prompts (they would hang a request forever);
  *   - bounded output and a timeout, so a huge diff or a wedged repository
  *     degrades into an error instead of eating the process. */
@@ -48,7 +49,7 @@ export function runGit(cwd: string, args: readonly string[], options: RunGitOpti
   return new Promise((resolve) => {
     const child = execFile(
       'git',
-      ['--no-pager', ...args],
+      ['--no-pager', '--literal-pathspecs', ...args],
       {
         cwd,
         env: gitEnv(),

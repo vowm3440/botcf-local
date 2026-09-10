@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import fastifyStatic from '@fastify/static'
 import fs from 'node:fs'
+import os from 'node:os'
 import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici'
 import { config } from './config.js'
 import { getDb } from './db.js'
@@ -15,6 +16,7 @@ import { startCredentialProxy } from './proxy/credentialProxy.js'
 import { registerApiRoutes } from './routes/api.js'
 import { onGenerationIdleOnce, registerChatRoutes } from './routes/chat.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
+import { registerDraftRoutes } from './routes/drafts.js'
 import { registerFileRoutes } from './routes/files.js'
 import { registerGitRoutes } from './routes/git.js'
 import { registerOmpRoutes } from './routes/omp.js'
@@ -27,11 +29,15 @@ import { registerWorkspaceRoutes } from './routes/workspace.js'
 import { previewManager, registerPreviewShutdown, type PreviewState } from './preview/manager.js'
 import { registerTaskShutdown } from './tasks/manager.js'
 import { registerTerminalShutdown } from './terminal/registry.js'
+import { clearTranscriptLogs } from './logs/transcripts.js'
 import { ompClient } from './omp/rpc.js'
 import { describeStartupBudget } from './omp/startupBudget.js'
 import { restartRuntime } from './omp/runtime.js'
 import { OmpUpdater, type OmpUpdateEvent } from './omp/updater.js'
-import { restoreWorkspace } from './workspace/store.js'
+import { rootRuntime } from './workspace/rootRuntime.js'
+import { getWorkspace, restoreWorkspace } from './workspace/store.js'
+import { ResourceDegrader, sampleSystemMemory } from './resource/degrade.js'
+import { onShutdown, runShutdownHandlers } from './process/shutdown.js'
 
 function configureNetworkProxy(): void {
   if (process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy) {
@@ -75,6 +81,10 @@ function collectRuntimeDiagnostics(updater: OmpUpdater): void {
 
 async function main(): Promise<void> {
   configureNetworkProxy()
+  // Transcripts mirror in-memory run/session records, which never survive a
+  // restart; sweep what a crashed process left behind so the logs dir stays
+  // bounded across boots.
+  clearTranscriptLogs(config.dataDir)
   await initSecrets()
   getDb()
   // Output caps are derived, so recompute them on every boot: routes stored
@@ -107,6 +117,7 @@ async function main(): Promise<void> {
   registerApiRoutes(app)
   registerChatRoutes(app)
   registerFileRoutes(app)
+  registerDraftRoutes(app)
   registerWorkspaceRoutes(app)
   registerPreviewRoutes(app)
   registerGitRoutes(app)
@@ -115,10 +126,30 @@ async function main(): Promise<void> {
   registerReviewRoutes(app)
   registerProjectConfigRoutes(app)
   registerDiagnosticsRoutes(app)
-  // Child processes (dev server, tasks, shells) must be released before exit.
+  // Handlers run in registration order (process/shutdown.ts), so release
+  // follows acquisition: cancel the in-flight AI session first, then let the
+  // process registries (preview dev server, tasks, shells) tear down.
+  onShutdown(() => ompClient.stop())
+  // Parked/pinned per-root runtimes stop after the active one: the facade above
+  // already stopped the chat target, this reaps whatever the pool kept warm.
+  onShutdown(() => rootRuntime.shutdown())
   registerPreviewShutdown()
   registerTaskShutdown()
   registerTerminalShutdown()
+  // Electron cannot deliver graceful POSIX signals on Windows. Its private
+  // IPC channel uses the same cleanup registry as Docker/SIGTERM shutdown.
+  if (process.send) {
+    let shuttingDown = false
+    const shutdown = (): void => {
+      if (shuttingDown) return
+      shuttingDown = true
+      void runShutdownHandlers().finally(() => process.exit(0))
+    }
+    process.on('message', (message) => {
+      if (message && typeof message === 'object' && 'type' in message && message.type === 'shutdown') shutdown()
+    })
+    process.once('disconnect', shutdown)
+  }
 
   const updater = new OmpUpdater({
     isIdle: () => !appState.generationInFlight,
@@ -139,6 +170,7 @@ async function main(): Promise<void> {
     log: (msg) => app.log.info(msg)
   })
   await updater.init()
+  onShutdown(() => updater.stopLoop())
   registerOmpRoutes(app, updater)
   collectRuntimeDiagnostics(updater)
 
@@ -174,7 +206,31 @@ async function main(): Promise<void> {
       )
     }
   }
+  // Whatever the start attempt produced (up, direct mode, or a failed binary),
+  // the boot restore is finished: the root reads as active, not 恢复中.
+  rootRuntime.completeActivation()
   updater.startLoop()
+
+  // Dynamic degradation (plan §4): a ten-second memory sample lowers parallel-AI
+  // capacity to 1 and pauses reload watchers of non-active roots while system
+  // memory stays below 15%, restoring both above 20% (5% hysteresis).
+  const degrader = new ResourceDegrader({
+    sample: sampleSystemMemory,
+    actions: {
+      capacity: () => rootRuntime.poolCapacity(),
+      setCapacity: (next) => rootRuntime.setPoolCapacity(next),
+      pauseBackgroundWatchers: () => {
+        const state = previewManager.getState()
+        const activeRootId = rootRuntime.snapshot().activeRootId
+        if (!state.running || !state.workdir || activeRootId === null) return
+        const root = getWorkspace().roots.find((entry) => entry.path === state.workdir)
+        if (root && root.id !== activeRootId) previewManager.pauseWatch()
+      },
+      resumeBackgroundWatchers: () => previewManager.resumeWatch()
+    }
+  })
+  degrader.start()
+  onShutdown(() => degrader.stop())
 
   if (restored || thirdRestored) {
     // The browser cannot poll its way out of this: it has no way of knowing a

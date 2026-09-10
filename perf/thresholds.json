@@ -24,7 +24,10 @@
   "baseline": {
     "source": "docs/test-report-2026-08-24.md · P2-004",
     "configuration": "A DIFFERENT CONFIGURATION from this harness. Those numbers came from the user's real environment — 8 workspace roots, a real OMP agent, a real session — while the gate runs a fresh data directory, one root, the updater pointed at a dead proxy and no agent process. Only the shape of the regression is comparable; the absolute MiB are not. Reading this block as if it described the gate's own starting point is what once produced the claim that `released after close >= 80 MiB` was unsatisfiable by construction. It is not: the gate measures its own empty workbench every run (`rendererBaselineMiB`, ~96 MiB of renderer), and against that the eight tabs added ~400 MiB before the text surface was virtualised.",
-    "shortInputMs": [714, 904],
+    "shortInputMs": [
+      714,
+      904
+    ],
     "treePeakWorkingSetMiB": 1453.4,
     "treePeakPrivateMiB": 1606.9,
     "releasedWithin10sMiB": 0,
@@ -49,5 +52,21 @@
     "jsHeapCommittedPeakMiB": 160,
     "retainedDeltaMiB": 140,
     "jsHeapRetainedMiB": 10
+  },
+  "workspace": {
+    "notes": [
+      "Gate for the workspace lifecycle run (perf/README.md §perf:workspace). Numbers are per run of `npm run perf:workspace` on the binding host recorded in last-workspace-run.json.",
+      "Limits are provisional first calibrations; recalibrate after three clean runs on the machine you gate with. `maxServerRssMiB` is the server process only (the stage-3 resource layer lives there); renderer limits reuse the editor gate philosophy of deltas/peak over the workbench.",
+      "Calibrated against the 2026-09-07 host (32 cores / 16 GiB, env in last-workspace-run.json): measured server peak ~67 MiB, churn retained ~1.6 MiB. Limits keep ~2-3× headroom; raise one only together with the measurement that justifies it."
+    ],
+    "gate": {
+      "maxServerRssMiB": 200,
+      "perRootServerMiB": 8,
+      "churnRetainedMiB": 16,
+      "churnGrowthPct": 8,
+      "handleRetained": 100,
+      "maxRendererMiB": 200,
+      "jsHeapRetainedMiB": 8
+    }
   }
 }

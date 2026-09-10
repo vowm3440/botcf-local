@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, ChangedFileInfo, FileEntry, WorkspaceMutation, WorkspaceRootInfo } from '../api'
+import { api, type ChangedFileInfo, type FileEntry, type WorkspaceMutation, type WorkspaceRootInfo, type WorkspaceRootRuntime } from '../api'
 import WorkspaceBar from './WorkspaceBar'
 import { notifyWorkspaceChanged, onWorkspaceChanged } from '../workspace/events'
 import { isUnderWorkspacePath } from '../workspace/paths'
@@ -8,7 +8,42 @@ import { useAutoReveal } from '../workspace/useAutoReveal'
 import { buildDiffCounts, type DiffCounts } from '../editor/editRegions'
 import { diffColor } from '../editor/diffPalette'
 
+/** Root lifecycle badge text/colours; 排队中 replaces 恢复中 while the root
+ *  waits for a pool slot that pinned runtimes are holding. */
+const RUNTIME_BADGE: Record<WorkspaceRootRuntime['status'], { label: string; color: string; border: string; background: string }> = {
+  active: { label: '活动', color: '#0a6', border: '#b7e2c8', background: '#e8f7ef' },
+  restoring: { label: '恢复中', color: '#b26a00', border: '#efc88b', background: '#fff6e8' },
+  background: { label: '后台', color: '#1a73e8', border: '#c6dafc', background: '#edf4ff' },
+  cold: { label: '休眠', color: '#767676', border: '#d8d8d8', background: '#f3f3f3' }
+}
+
+function RuntimeBadge({ runtime }: { runtime: WorkspaceRootRuntime }) {
+  const entry = RUNTIME_BADGE[runtime.status]
+  const queued = runtime.queued && runtime.status === 'restoring'
+  const label = queued ? '排队中' : entry.label
+  const color = queued ? '#c0392b' : entry.color
+  return (
+    <span
+      title={
+        queued
+          ? '等待 OMP 运行时槽位(有已固定的目录占满);取消固定或移除后会自动启动'
+          : runtime.status === 'active'
+            ? '当前活动目录,AI 会话在此运行'
+            : runtime.status === 'background'
+              ? '后台保留中(空闲 5 分钟或需要槽位时回收)'
+              : runtime.status === 'restoring'
+                ? '正在恢复 OMP 会话…'
+                : '无运行中的 OMP 会话'
+      }
+      style={{ marginLeft: 4, fontSize: 10, fontWeight: 400, color, border: '1px solid ' + entry.border, background: entry.background, borderRadius: 3, padding: '0 3px' }}
+    >
+      {runtime.pinned ? '📌 ' : ''}{label}
+    </span>
+  )
+}
+
 interface FileTreeProps {
+
   /** Cumulative per-session changed files, keyed by qualified workspace path. */
   changed: Map<string, ChangedFileInfo>
   /** Open a file (qualified workspace path) in the editor drawer. */
@@ -182,6 +217,24 @@ export default function FileTree({ changed, onOpenFile, activePath = null }: Fil
     }
   }
 
+  /** Pin/unpin a root's OMP session. Unlike 设为主 this never restarts or stops
+   *  anything — it only changes whether the idle sweep may recycle the runtime. */
+  const togglePin = async (root: WorkspaceRootInfo) => {
+    const pinned = !root.runtime?.pinned
+    setBusy(true)
+    setNotice(null)
+    try {
+      await api.setRootPinned(root.id, pinned)
+      setNotice({ text: pinned ? '已固定 ' + root.name + ' 的 OMP 会话,空闲不回收' : '已取消固定 ' + root.name })
+      await loadDir('')
+      notifyWorkspaceChanged()
+    } catch (e) {
+      setNotice({ text: e instanceof Error ? e.message : '固定设置失败', failed: true })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const toggleDir = (workspacePath: string) => {
     if (dirs[workspacePath]) {
       setDirs((prev) => {
@@ -217,9 +270,34 @@ export default function FileTree({ changed, onOpenFile, activePath = null }: Fil
           >
             {root.exists ? (opened ? '▾' : '▸') : '⚠'} {root.name}
             {root.primary && <span title="AI 的工作目录(cwd)" style={{ marginLeft: 4, fontSize: 10, fontWeight: 400, color: '#0a6', border: '1px solid #b7e2c8', borderRadius: 3, padding: '0 3px' }}>主</span>}
+            {root.runtime && <RuntimeBadge runtime={root.runtime} />}
             {!opened && hasChangeUnder(root.name) && <span style={{ color: '#2a7d46', marginLeft: 4 }}>●</span>}
           </span>
+          {root.runtime && root.exists && (
+            <button
+              onClick={() => { togglePin(root).catch(() => undefined) }}
+              disabled={busy}
+              aria-pressed={root.runtime.pinned}
+              title={
+                root.runtime.pinned
+                  ? '已固定该目录的 OMP 会话:空闲也不会被回收(取消固定后恢复 5 分钟回收)'
+                  : '固定该目录的 OMP 会话:切换主目录后仍在后台保留,空闲不回收'
+              }
+              style={{
+                fontSize: 10,
+                padding: '0 4px',
+                border: '1px solid #ccc',
+                borderRadius: 3,
+                background: root.runtime.pinned ? 'rgba(255, 193, 7, 0.18)' : '#fff',
+                color: root.runtime.pinned ? '#8a6d00' : '#666',
+                cursor: 'pointer'
+              }}
+            >
+              {root.runtime.pinned ? '固定中' : '固定'}
+            </button>
+          )}
           {!root.primary && root.exists && (
+
             <button
               onClick={() => { mutate(() => api.setPrimaryRoot(root.id), () => `已切换主目录到 ${root.name}`).catch(() => undefined) }}
               disabled={busy}

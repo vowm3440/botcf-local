@@ -351,6 +351,33 @@ describe('OmpUpdater events', () => {
     expect(updater.getState().currentVersion).toBe(version)
   })
 
+  it('retries a failed first installation instead of reporting the broken version as current', async () => {
+    let healthy = false
+    const updater = new OmpUpdater({
+      isIdle: () => true,
+      onIdleOnce: vi.fn(),
+      healthProbe: async () => healthy,
+      log: vi.fn()
+    })
+    await updater.init()
+    await stageRelease(updater)
+    const events: OmpUpdateEvent[] = []
+    updater.on('update', (event) => events.push(event))
+
+    await updater.checkOnce()
+    expect(updater.getState().currentVersion).toBeNull()
+    expect(updater.getState().lastError).not.toBeNull()
+    expect(events.at(-1)?.phase).toBe('error')
+    await expect(fs.lstat(path.join(tempDir, 'current'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    healthy = true
+    await updater.checkOnce()
+    expect(updater.getState().currentVersion).toBe('v2')
+    expect(updater.getState().lastError).toBeNull()
+    expect(events.at(-1)?.phase).toBe('switched')
+    expect(await fs.readFile(path.join(tempDir, 'current', process.platform === 'win32' ? 'omp.exe' : 'omp'), 'utf8')).toBe('new binary')
+  })
+
   it('coalesces concurrent startup and manual checks into one release request', async () => {
     const { updater } = await createUpdater()
     let resolveRelease!: (release: Awaited<ReturnType<OmpUpdater['fetchLatestRelease']>>) => void

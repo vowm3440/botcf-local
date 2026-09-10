@@ -1,5 +1,8 @@
 import { FastifyInstance } from 'fastify'
+import fs from 'node:fs'
 import path from 'node:path'
+import { config } from '../config.js'
+import { transcriptFile } from '../logs/transcripts.js'
 import { detectProject } from '../preview/projectDetect.js'
 import { loadProjectConfig } from '../projectConfig/store.js'
 import { findTask, groupTasksByKind, resolveTasks, type TaskDefinition } from '../tasks/model.js'
@@ -94,6 +97,21 @@ export function registerTaskRoutes(app: FastifyInstance): void {
     const stopped = await taskManager.stop(runId.trim())
     if (!stopped) return reply.code(404).send({ success: false, error: '没有这个任务执行记录' })
     return { success: true, runs: taskManager.list() }
+  })
+
+  /** Full plain-text transcript of a run. The in-memory ring buffer keeps at
+   *  most MAX_RUN_LINES lines; the disk copy behind this endpoint has them all,
+   *  so an overlong build log stays paste-able after the panel turned over. */
+  app.get<{ Params: { id: string } }>('/api/tasks/runs/:id/log', async (req, reply) => {
+    const run = taskManager.get(req.params.id)
+    if (!run) return reply.code(404).send({ success: false, error: '没有这个任务执行记录' })
+    const file = transcriptFile(config.dataDir, 'tasks', run.info().rootId, req.params.id)
+    try {
+      const text = fs.readFileSync(file, 'utf8')
+      return reply.type('text/plain; charset=utf-8').send(text)
+    } catch {
+      return reply.code(404).send({ success: false, error: '完整日志不存在(该执行没有输出或日志未启用)' })
+    }
   })
 
   /** Log catch-up for one run; `after` is the last sequence number rendered. */

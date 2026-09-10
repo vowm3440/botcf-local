@@ -107,6 +107,18 @@ export interface FileEntry {
 
 /** Multi-root workspace ----------------------------------------------------- */
 
+/** Lifecycle of one root's agent runtime (cold/restoring/active/background).
+ *  Absent on servers that predate the runtime controller. */
+export interface WorkspaceRootRuntime {
+  rootId: string
+  status: 'active' | 'restoring' | 'background' | 'cold'
+  pinned: boolean
+  busy: boolean
+  running: boolean
+  /** True when the root is active but every pool slot is held by pinned roots. */
+  queued: boolean
+}
+
 /** One open project directory. `name` is the leading segment of every qualified
  *  workspace path (`<name>/<relative>`) inside this root. */
 export interface WorkspaceRootInfo {
@@ -117,6 +129,17 @@ export interface WorkspaceRootInfo {
   exists: boolean
   /** The agent's cwd. Exactly one root is primary while the workspace is open. */
   primary: boolean
+  /** Per-root runtime lifecycle when the server exposes it. */
+  runtime?: WorkspaceRootRuntime
+}
+
+export interface WorkspaceRuntimeSnapshot {
+  activeRootId: string | null
+  capacity: number
+  running: number
+  queued: boolean
+  roots: WorkspaceRootRuntime[]
+  closedLog: Array<{ rootId: string; closedAt: number }>
 }
 
 export interface WorkspaceInfo {
@@ -125,6 +148,8 @@ export interface WorkspaceInfo {
   /** Primary root path — OMP's working directory. */
   workdir: string | null
   maxRoots: number
+  /** Pool + per-root lifecycle state (present on current servers). */
+  runtime?: WorkspaceRuntimeSnapshot
 }
 
 export interface WorkspaceMutation extends WorkspaceInfo {
@@ -440,6 +465,18 @@ export const api = {
       body: JSON.stringify({ id })
     }).then((r) => json<WorkspaceMutation>(r)),
 
+  /** Pin/unpin a root so its OMP session is never recycled by the idle sweep.
+   *  Pinning more roots than the pool capacity queues later activations. */
+  setRootPinned: (id: string, pinned: boolean) =>
+    fetch('/api/workspace/runtime/pin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, pinned })
+    }).then((r) => json<WorkspaceInfo & { success: boolean }>(r)),
+
+  runtimeSnapshot: () =>
+    fetch('/api/workspace/runtime').then((r) => json<WorkspaceRuntimeSnapshot & { success: boolean }>(r)),
+
   /** Directory listing for a qualified workspace path; '' lists the roots. */
   files: (workspacePath: string) =>
     fetch(`/api/omp/files?path=${encodeURIComponent(workspacePath)}`).then((r) =>
@@ -471,6 +508,25 @@ export const api = {
     fetch('/api/chat/history').then((r) =>
       json<{ success: boolean; source: 'omp' | 'local'; messages: Array<{ role: 'user' | 'assistant'; content: string }> }>(r)
     ),
+
+  /** One bounded history page (rpc.md get_messages_page passthrough). When the
+   *  server answers without paging metadata the legacy drain shape came back:
+   *  totalMessages === undefined means this was the whole transcript. */
+  historyPage: (cursor?: string, limit?: number) => {
+    const params = new URLSearchParams()
+    if (cursor) params.set('cursor', cursor)
+    if (limit) params.set('limit', String(limit))
+    const query = params.toString()
+    return fetch('/api/chat/history' + (query ? '?' + query : '')).then((r) =>
+      json<{
+        success: boolean
+        source: 'omp' | 'local'
+        messages: Array<{ role: 'user' | 'assistant'; content: string }>
+        totalMessages?: number
+        nextCursor?: string
+      }>(r)
+    )
+  },
 
   newSession: () => fetch('/api/chat/new', { method: 'POST' }).then((r) => json<{ success: boolean }>(r)),
 

@@ -120,7 +120,8 @@ export class DevCommandRunner extends EventEmitter {
     child.on('error', (err: Error) => {
       this.emit('log', `进程错误: ${err.message}`)
     })
-    child.on('exit', (code: number | null) => {
+    // Failed spawns emit error + close, but no exit; close also drains stdio.
+    child.once('close', (code: number | null) => {
       this.child = null
       this.emit('exit', code)
     })

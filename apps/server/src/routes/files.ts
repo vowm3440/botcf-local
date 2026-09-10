@@ -4,6 +4,7 @@ import path from 'node:path'
 import { detectEncoding, encodeText } from '../textEncoding.js'
 import { MAX_FILE_CONTENT_BYTES, readFileBounded } from '../textFile.js'
 import { locateWorkspacePath, workspaceRootInfos, type WorkspaceLocation } from '../workspace/locate.js'
+import { rootRuntime } from '../workspace/rootRuntime.js'
 import { MAX_WORKSPACE_ROOTS, formatWorkspacePath, primaryRoot, type Workspace } from '../workspace/model.js'
 import { getWorkspace } from '../workspace/store.js'
 
@@ -132,9 +133,10 @@ function workspaceFields(workspace: Workspace): {
   roots: ReturnType<typeof workspaceRootInfos>
   maxRoots: number
 } {
+  const runtimeById = new Map(rootRuntime.snapshot().roots.map((entry) => [entry.rootId, entry]))
   return {
     workdir: primaryRoot(workspace)?.path ?? null,
-    roots: workspaceRootInfos(workspace),
+    roots: workspaceRootInfos(workspace, runtimeById),
     maxRoots: MAX_WORKSPACE_ROOTS
   }
 }

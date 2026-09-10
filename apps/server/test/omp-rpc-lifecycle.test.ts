@@ -1,5 +1,10 @@
+import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { PassThrough } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OmpRpcClient } from '../src/omp/rpc.js'
 import { readyDurationStats, resetReadyDurations, type StartupBudget } from '../src/omp/startupBudget.js'
@@ -66,19 +71,30 @@ afterEach(() => {
 })
 
 describe('OmpRpcClient lifecycle', () => {
-  it('waits for the old process and ignores its stale exit events', async () => {
+  it('ignores frames and exits from a retired process after restarting', async () => {
     const children: FakeOmpProcess[] = []
     const client = makeClient(budgetOf(), children)
+    const events: Record<string, unknown>[] = []
+    client.on('event', (event) => events.push(event))
 
     await client.start()
     await client.stop()
     await client.start()
+    try {
+      children[0].emit('exit', 0)
+      children[0].send({ type: 'ready' })
+      children[0].send({ type: 'extension_ui_request', method: 'confirm', id: 'retired-dialog' })
+      expect(client.running).toBe(false)
+      expect(events).toEqual([])
 
-    children[0].emit('exit', 0)
-    await client.start()
-
-    expect(children).toHaveLength(2)
-    expect(children[0].kill).toHaveBeenCalledTimes(1)
+      children[1].answerGetState()
+      children[1].send({ type: 'ready' })
+      expect(await client.handshake()).toBe(true)
+      children[1].send({ type: 'extension_ui_request', method: 'confirm', id: 'current-dialog' })
+      expect(events).toEqual([{ type: 'extension_ui_request', method: 'confirm', id: 'current-dialog' }])
+    } finally {
+      await client.stop()
+    }
   })
 })
 
@@ -156,5 +172,65 @@ describe('OmpRpcClient handshake budget', () => {
     await client.start()
     expect(await client.handshake({ readyMs: 100 })).toBe(false)
     expect(client.lastProtocolError).toContain('等待 ready 帧超时')
+  })
+})
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The fixture writes its pids a moment after spawn; poll for the file. */
+async function readTreePids(file: string): Promise<{ parent: number; grandchild: number }> {
+  const until = Date.now() + 5_000
+  while (Date.now() < until) {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8')) as { parent: number; grandchild: number }
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+  throw new Error(`pid 文件未在 5s 内出现: ${file}`)
+}
+
+describe('OmpRpcClient process-tree reclamation', () => {
+  it('stop() reaps grandchildren the OMP child spawned', async () => {
+    const pidFile = path.join(os.tmpdir(), `botcf-omp-tree-${process.pid}-${Date.now()}.json`)
+    const fixture = fileURLToPath(new URL('./fixtures/omp-tree-child.cjs', import.meta.url))
+    // Windows cannot exec a .cjs directly (spawn EFTYPE), so the seam runs the
+    // fixture under node while still returning a real child process with a pid.
+    const spawnFixture: typeof spawn = (_file, args, options) =>
+      spawn(process.execPath, [fixture, ...(args as string[])], options)
+    const client = new OmpRpcClient({
+      spawnProcess: spawnFixture,
+      syncModelsConfig: () => undefined,
+      binaryPath: () => process.execPath,
+      binaryExists: () => true,
+      budget: () => budgetOf()
+    })
+    process.env.OMP_TREE_PID_FILE = pidFile
+    try {
+      expect(await client.start()).toBe(true)
+      const pids = await readTreePids(pidFile)
+      expect(typeof pids.parent).toBe('number')
+      expect(typeof pids.grandchild).toBe('number')
+      expect(isAlive(pids.parent)).toBe(true)
+      expect(isAlive(pids.grandchild)).toBe(true)
+
+      await client.stop()
+
+      // taskkill (win32) and the group signal (POSIX) settle after the direct
+      // child exits, so poll instead of asserting on the first tick.
+      await vi.waitFor(() => expect(isAlive(pids.parent)).toBe(false), { timeout: 8_000, interval: 100 })
+      await vi.waitFor(() => expect(isAlive(pids.grandchild)).toBe(false), { timeout: 8_000, interval: 100 })
+    } finally {
+      delete process.env.OMP_TREE_PID_FILE
+      await client.stop()
+      fs.rmSync(pidFile, { force: true })
+    }
   })
 })

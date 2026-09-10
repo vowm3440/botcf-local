@@ -20,8 +20,10 @@ export function getJson<T>(url: string): Promise<T> {
 export function postJson<T>(url: string, body?: unknown): Promise<T> {
   return fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    ...(body === undefined ? {} : {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
   }).then((res) => unwrap<T>(res))
 }
 

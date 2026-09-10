@@ -1,4 +1,7 @@
 import fs from 'node:fs'
+import { config } from '../config.js'
+import { clearRootDraftRecovery } from '../drafts/recovery.js'
+import { clearRootTranscripts } from '../logs/transcripts.js'
 import { restartRuntime, type RuntimeRestart } from '../omp/runtime.js'
 import { previewManager } from '../preview/manager.js'
 import { taskManager } from '../tasks/manager.js'
@@ -13,6 +16,7 @@ import {
   type Workspace,
   type WorkspaceRoot
 } from './model.js'
+import { rootRuntime } from './rootRuntime.js'
 import { getWorkspace, setWorkspace } from './store.js'
 
 /** Workspace mutations with their runtime consequences.
@@ -85,12 +89,24 @@ async function stopPreviewForRoot(root: WorkspaceRoot): Promise<void> {
   }
 }
 
-/** Apply a workspace whose primary root differs from the current one. */
+/** Apply a workspace whose primary root differs from the current one.
+ *
+ *  setWorkspace() already asked the runtime controller to park the outgoing
+ *  primary (its process stays warm unless a turn was in flight) and bind the new
+ *  one. This function then performs the actual restart of the *active* client —
+ *  the pool enforces the process cap, evicting a parked root when a switch needs
+ *  a slot — and reports the outcome for the mutation payload. */
 async function commitWithRestart(next: Workspace, root: WorkspaceRoot | null, added: boolean): Promise<WorkspaceMutation> {
   const before = primaryRoot(getWorkspace())?.id ?? null
   setWorkspace(next)
   const after = next.primaryId
-  const outcome = before === after ? null : await reactivateRuntime()
+  let outcome: RuntimeRestart | null = null
+  if (before !== after) {
+    outcome = await reactivateRuntime()
+    // The badge must not sit on 恢复中 forever: whatever the restart produced
+    // (up, direct mode, or a route failure), the root is what the user picked.
+    rootRuntime.completeActivation()
+  }
   return {
     ok: true,
     workspace: next,
@@ -127,6 +143,12 @@ export async function removeRootFromWorkspace(id: string): Promise<WorkspaceMuta
   // even blocks deleting or moving it afterwards.
   await taskManager.stopForRoot(root.id).catch(() => 0)
   await terminalRegistry.closeForRoot(root.id).catch(() => 0)
+  // Recovery-log entries under <dataDir>/drafts/<rootId>/ belong to a root that
+  // just left the workspace; keeping them would resurrect edits for a directory
+  // the user deliberately detached.
+  clearRootDraftRecovery(config.dataDir, root.id)
+  // Full transcripts of that root's tasks/shells go with it.
+  clearRootTranscripts(config.dataDir, root.id)
   return commitWithRestart(removeRoot(workspace, id), root, false)
 }
 

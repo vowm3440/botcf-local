@@ -97,6 +97,10 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
 
   const abort = new AbortController()
   req.raw.on('aborted', () => abort.abort())
+  const abortOnClose = (): void => {
+    if (!reply.raw.writableFinished) abort.abort()
+  }
+  reply.raw.on('close', abortOnClose)
 
   /** Health probe bookkeeping must never break the data path. */
   const probe = (ok: boolean, status: number): void => {
@@ -147,8 +151,11 @@ async function forward(req: FastifyRequest, reply: FastifyReply): Promise<void> 
     if (!reply.raw.headersSent) {
       reply.code(502).send({ error: { message: '上游请求失败' } })
     } else {
-      reply.raw.end()
+      // Do not turn a truncated upstream stream into a successful EOF.
+      reply.raw.destroy(err instanceof Error ? err : new Error(String(err)))
     }
+  } finally {
+    reply.raw.off('close', abortOnClose)
   }
 }
 

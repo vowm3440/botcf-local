@@ -1,0 +1,151 @@
+{
+  "when": "2026-09-07T05:12:45.095Z",
+  "env": {
+    "platform": "win32 10.0.26100",
+    "cpus": 32,
+    "totalMemMiB": 15583,
+    "electron": "43.4.0",
+    "chrome": "150.0.7871.224",
+    "node": "24.18.1",
+    "windowShown": false,
+    "budgetMs": {
+      "total": 240000,
+      "serverHealth": 30000,
+      "pageLoad": 60000,
+      "workbench": 30000,
+      "settle": 8000
+    }
+  },
+  "fixture": {
+    "roots": 8,
+    "cycles": 50
+  },
+  "metrics": {
+    "server": {
+      "baselineMiB": 67.6,
+      "atRoots": [
+        {
+          "roots": 1,
+          "rssMiB": 66.7,
+          "handles": 300
+        },
+        {
+          "roots": 4,
+          "rssMiB": 67,
+          "handles": 300
+        },
+        {
+          "roots": 8,
+          "rssMiB": 67.6,
+          "handles": 300
+        }
+      ],
+      "snapshot": {
+        "roots": 8,
+        "activeRootId": "rd95e979531",
+        "capacity": 2,
+        "running": 0,
+        "queued": false,
+        "closedLog": 0
+      }
+    },
+    "perRootServerMiB": 0.1,
+    "churn": {
+      "startMiB": 67.6,
+      "midMiB": 69,
+      "endMiB": 69.3,
+      "deltaMiB": 1.7,
+      "growthPct": 2.5,
+      "startHandles": 300,
+      "endHandles": 300,
+      "handleDelta": 0
+    },
+    "renderer": {
+      "peakMiB": 98.4,
+      "jsHeapRetainedMiB": 0
+    }
+  },
+  "thresholds": {
+    "notes": [
+      "Gate for the workspace lifecycle run (perf/README.md §perf:workspace). Numbers are per run of `npm run perf:workspace` on the binding host recorded in last-workspace-run.json.",
+      "Limits are provisional first calibrations; recalibrate after three clean runs on the machine you gate with. `maxServerRssMiB` is the server process only (the stage-3 resource layer lives there); renderer limits reuse the editor gate philosophy of deltas/peak over the workbench.",
+      "Calibrated against the 2026-09-07 host (32 cores / 16 GiB, env in last-workspace-run.json): measured server peak ~67 MiB, churn retained ~1.6 MiB. Limits keep ~2-3× headroom; raise one only together with the measurement that justifies it."
+    ],
+    "gate": {
+      "maxServerRssMiB": 200,
+      "perRootServerMiB": 8,
+      "churnRetainedMiB": 16,
+      "churnGrowthPct": 8,
+      "handleRetained": 100,
+      "maxRendererMiB": 200,
+      "jsHeapRetainedMiB": 8
+    }
+  },
+  "gate": [
+    {
+      "name": "server peak across 8 roots",
+      "value": 67.6,
+      "limit": 200,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "server per additional root",
+      "value": 0.1,
+      "limit": 8,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "churn retained on server",
+      "value": 1.7,
+      "limit": 16,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "churn growth %",
+      "value": 2.5,
+      "limit": 8,
+      "unit": "%",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "churn handles retained",
+      "value": 0,
+      "limit": 100,
+      "unit": "",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "pool running <= capacity",
+      "value": 0,
+      "limit": 2,
+      "unit": "",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "renderer peak working set",
+      "value": 98.4,
+      "limit": 200,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "renderer JS heap retained",
+      "value": 0,
+      "limit": 8,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    }
+  ],
+  "pass": true
+}

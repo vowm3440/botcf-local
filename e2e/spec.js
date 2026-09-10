@@ -567,13 +567,13 @@
       )
     })
 
-    // Last, and the only one that needs the *server* to run a turn. Everything above
-    // is reachable with the upstream faked in the renderer; the review panel is not —
+    // After the editor assertions, the only check that needs the *server* to run a turn.
+    // Earlier checks fake the upstream in the renderer; the review panel cannot —
     // `recordAgentTurn` is called on the OMP branch of routes/chat.ts, so a real
     // message has to go out and a real runtime has to answer it. That is what the stub
-    // behind the server is for. It runs last because the turn opens tabs and moves the
-    // editor, which would make the cross-panel assertions above pass for the wrong
-    // reason.
+    // behind the server is for. It runs after the cross-panel assertions because the
+    // turn opens tabs and moves the editor, which would otherwise make those assertions
+    // pass for the wrong reason.
     await check('真实的一次 agent 回合填出审查面板', async () => {
       await window.__HARNESS__.sendMessage('(e2e) 改一处给审查面板看', { timeoutMs })
       // A turn's changed files each open a tab — the app's own signal that the
@@ -591,6 +591,53 @@
       const title = item.getAttribute('title') ?? ''
       expect(title.includes('edit_file'), `审查条目没有记下工具名:${JSON.stringify(title)}`)
       return title
+    })
+
+    await check('终端会话能补齐后台历史并通过面板关闭', async () => {
+      const ids = []
+      const request = async (url, body) => {
+        const response = await fetch(url, {
+          method: 'POST',
+          ...(body === undefined ? {} : {
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          })
+        })
+        expect(response.ok, `${url}:HTTP ${response.status}`)
+        return response.json()
+      }
+      try {
+        for (let index = 0; index < 2; index++) {
+          const result = await request('/api/terminal/sessions', {})
+          ids.push(result.session.id)
+        }
+        await request(`/api/terminal/sessions/${ids[1]}/input`, { data: 'echo E2E_EARLY_TERMINAL' })
+        await openPart('终端', 'select[aria-label="shell"]')
+        const picker = await waitFor('两个终端会话', () => {
+          const select = document.querySelector('select[aria-label="终端会话"]')
+          return select?.options.length === 2 ? select : null
+        })
+        await request(`/api/terminal/sessions/${ids[1]}/input`, { data: 'echo E2E_LATE_TERMINAL' })
+        await settle()
+        picker.value = ids[1]
+        picker.dispatchEvent(new Event('change', { bubbles: true }))
+        await waitFor('后台会话的完整历史', () =>
+          document.body.textContent.includes('E2E_EARLY_TERMINAL') &&
+          document.body.textContent.includes('E2E_LATE_TERMINAL')
+        )
+        const close = await waitFor('关闭会话按钮', () =>
+          [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '关闭会话' && !button.disabled)
+        )
+        close.click()
+        await waitFor('关闭后只剩一个会话', () => !document.querySelector('select[aria-label="终端会话"]'))
+        const response = await fetch('/api/terminal/sessions')
+        const result = await response.json()
+        expect(!result.sessions.some((session) => session.id === ids[1]), '面板关闭后服务端仍保留会话')
+      } finally {
+        for (const id of ids) {
+          await fetch(`/api/terminal/sessions/${id}/close`, { method: 'POST' })
+        }
+      }
     })
 
     return { ok: checks.every((entry) => entry.ok === true), checks }

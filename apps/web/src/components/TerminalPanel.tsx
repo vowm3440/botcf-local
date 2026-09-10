@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import LogPane, { type LogEntry } from './LogPane'
+import { mergeLogLines } from './logLines'
 import RootPicker from './RootPicker'
 import { BUTTON, DANGER_BUTTON, EMPTY_HINT, INPUT, MONO, PANEL_BODY, PRIMARY_BUTTON, SELECT, STATUS_LINE, TOOLBAR } from './ui'
 import {
@@ -46,20 +47,18 @@ export default function TerminalPanel() {
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
-  /** Highest sequence number applied per session, so catch-up never duplicates. */
-  const lastSeq = useRef<Record<string, number>>({})
+  /** Clear only this panel's past output, including late snapshot responses. */
+  const clearedThrough = useRef<Record<string, number>>({})
   const activeRef = useRef<string | null>(null)
   activeRef.current = activeId
 
   const applyLines = useCallback((sessionId: string, incoming: readonly TerminalLine[]) => {
     if (incoming.length === 0) return
     setLines((prev) => {
-      const known = lastSeq.current[sessionId] ?? 0
-      const fresh = incoming.filter((line) => line.seq > known)
-      if (fresh.length === 0) return prev
-      lastSeq.current[sessionId] = fresh[fresh.length - 1].seq
-      const merged = [...(prev[sessionId] ?? []), ...fresh]
-      return { ...prev, [sessionId]: merged.slice(-1_500) }
+      return {
+        ...prev,
+        [sessionId]: mergeLogLines(prev[sessionId] ?? [], incoming, 1_500, clearedThrough.current[sessionId] ?? 0)
+      }
     })
   }, [])
 
@@ -73,20 +72,29 @@ export default function TerminalPanel() {
       const live = result.sessions.find((session) => session.running) ?? result.sessions[0] ?? null
       if (live && !activeRef.current) {
         setActiveId(live.id)
-        const transcript = await terminalApi.transcript(live.id)
-        applyLines(live.id, transcript.lines)
       }
       setNotice(null)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '终端状态读取失败')
     }
-  }, [applyLines])
+  }, [])
 
   useEffect(() => {
     loadSessions().catch(() => undefined)
   }, [loadSessions])
 
   useEffect(() => onWorkspaceChanged(() => { loadSessions().catch(() => undefined) }), [loadSessions])
+
+  useEffect(() => {
+    if (!activeId) return
+    let cancelled = false
+    terminalApi.transcript(activeId, clearedThrough.current[activeId] ?? 0)
+      .then((result) => { if (!cancelled) applyLines(activeId, result.lines) })
+      .catch((error: unknown) => {
+        if (!cancelled) setNotice(error instanceof Error ? error.message : '终端记录读取失败')
+      })
+    return () => { cancelled = true }
+  }, [activeId, applyLines])
 
   // One stream for every session: the panel can show any of them without
   // re-subscribing, and a background session keeps filling its buffer.
@@ -107,7 +115,7 @@ export default function TerminalPanel() {
       const current = activeRef.current
       if (!current) return
       terminalApi
-        .transcript(current, lastSeq.current[current] ?? 0)
+        .transcript(current, clearedThrough.current[current] ?? 0)
         .then((result) => applyLines(current, result.lines))
         .catch(() => undefined)
     }
@@ -125,7 +133,6 @@ export default function TerminalPanel() {
       })
       setSessions((prev) => [...prev.filter((session) => session.id !== result.session.id), result.session])
       setActiveId(result.session.id)
-      lastSeq.current[result.session.id] = 0
       applyLines(result.session.id, result.lines)
       setNotice(null)
     } catch (error) {
@@ -135,16 +142,6 @@ export default function TerminalPanel() {
     }
   }
 
-  const select = async (id: string): Promise<void> => {
-    setActiveId(id)
-    if (lines[id] !== undefined) return
-    try {
-      const transcript = await terminalApi.transcript(id)
-      applyLines(id, transcript.lines)
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : '终端记录读取失败')
-    }
-  }
 
   const send = async (): Promise<void> => {
     const text = input
@@ -209,7 +206,7 @@ export default function TerminalPanel() {
           <select
             aria-label="终端会话"
             value={activeId ?? ''}
-            onChange={(event) => { select(event.target.value).catch(() => undefined) }}
+            onChange={(event) => setActiveId(event.target.value)}
             style={{ ...SELECT, maxWidth: 220 }}
           >
             {sessions.map((session) => (
@@ -237,6 +234,7 @@ export default function TerminalPanel() {
           title="只清空本面板显示,不影响会话"
           onClick={() => {
             if (!activeId) return
+            clearedThrough.current[activeId] = lines[activeId]?.at(-1)?.seq ?? clearedThrough.current[activeId] ?? 0
             setLines((prev) => ({ ...prev, [activeId]: [] }))
           }}
         >

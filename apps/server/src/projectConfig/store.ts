@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { locateInsideRoot } from '../fsContainment.js'
 import {
   DEFAULT_PROJECT_CONFIG,
   parseProjectConfig,
@@ -9,11 +10,10 @@ import {
 
 /** Persistence for the per-project config.
  *
- *  The file is `<root>/.botcf/config.json`, a path derived entirely from the
- *  resolved workspace root — never from client input — so there is no path to
- *  contain here. Reads are cached by mtime because the task list, the preview
- *  defaults and the terminal shell are all read on nearly every panel refresh;
- *  a missing file is a normal state that yields the defaults. */
+ *  The file is `<root>/.botcf/config.json`. Even though its name is fixed,
+ *  `.botcf` or the file itself may be a symlink/junction, so both must stay
+ *  inside the root. Reads are cached by mtime; a missing file normally yields
+ *  the defaults. */
 
 export const CONFIG_DIR_NAME = '.botcf'
 export const CONFIG_FILE_NAME = 'config.json'
@@ -26,6 +26,18 @@ export function projectConfigDir(rootPath: string): string {
 
 export function projectConfigFile(rootPath: string): string {
   return path.join(projectConfigDir(rootPath), CONFIG_FILE_NAME)
+}
+
+function assertConfigContained(rootPath: string): void {
+  for (const relative of [CONFIG_DIR_NAME, path.join(CONFIG_DIR_NAME, CONFIG_FILE_NAME)]) {
+    const located = locateInsideRoot(rootPath, relative)
+    if (located.status === 'outside') throw new Error('配置路径越出工作目录')
+    // A missing ordinary entry can be created. A dangling link cannot: its
+    // eventual write target is not the contained parent used by locate.
+    if (located.status === 'missing' && fs.lstatSync(path.join(rootPath, relative), { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw new Error('配置路径包含无法解析的符号链接')
+    }
+  }
 }
 
 export interface LoadedProjectConfig {
@@ -59,6 +71,19 @@ function statOrNull(file: string): fs.Stats | null {
 export function loadProjectConfig(rootPath: string): LoadedProjectConfig {
   const file = projectConfigFile(rootPath)
   const stat = statOrNull(file)
+  try {
+    assertConfigContained(rootPath)
+  } catch (err: unknown) {
+    cache.delete(file)
+    return {
+      file,
+      exists: stat !== null,
+      config: DEFAULT_PROJECT_CONFIG,
+      warnings: [err instanceof Error ? err.message : String(err)],
+      text: null,
+      mtimeMs: stat?.mtimeMs ?? null
+    }
+  }
   if (!stat) {
     cache.delete(file)
     return { file, exists: false, config: DEFAULT_PROJECT_CONFIG, warnings: [], text: null, mtimeMs: null }
@@ -105,6 +130,7 @@ export type SaveResult =
  *  up instead of silently keeping them. */
 export function saveProjectConfig(rootPath: string, config: ProjectConfig): SaveResult {
   try {
+    assertConfigContained(rootPath)
     fs.mkdirSync(projectConfigDir(rootPath), { recursive: true })
     const file = projectConfigFile(rootPath)
     fs.writeFileSync(file, serializeProjectConfig(config), 'utf8')

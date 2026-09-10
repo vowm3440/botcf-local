@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, AppStateInfo, OmpUiRequest, OmpUpdateEvent } from './api'
+import { installDefaultDraftRecovery } from './editor/draftRecovery'
+
+// Module scope, before any component mounts: the disk recovery log must be
+// installed before a FileViewer asks it for a spilled draft.
+installDefaultDraftRecovery()
 import Login from './pages/Login'
 import Workbench from './pages/Workbench'
 import TopBar from './components/TopBar'
@@ -25,8 +30,8 @@ export default function App() {
 
   useEffect(() => {
     if (state || !error) return
-    const timer = window.setTimeout(refresh, 2_000)
-    return () => window.clearTimeout(timer)
+    const timer = window.setInterval(refresh, 2_000)
+    return () => window.clearInterval(timer)
   }, [error, refresh, state])
 
   // Startup restoration runs after the HTTP server is up, so the first state we

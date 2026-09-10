@@ -48,27 +48,29 @@ function isUsableBearerKey(value: string): boolean {
  *  shared keys: we only ever match on our own omp-local-* naming scheme. */
 export async function ensureDedicatedKey(client: BotcfClient, group: string): Promise<{ name: string; key: string; token: BotcfTokenItem }> {
   const name = dedicatedKeyName(group)
-  const secretName = `botcf.dedicated-key.${name}`
+  const secretName = `botcf.dedicated-key.${config.botcfBaseUrl}.${client.currentUserId}.${name}`
+  // The old device/group-only cache could reuse a different account's key.
+  deleteSecret(`botcf.dedicated-key.${name}`)
   const findByName = (tokens: BotcfTokenItem[]): BotcfTokenItem | undefined =>
     tokens.find((item) => item.name === name && item.status === 1)
+  let token = findByName(await client.listTokens())
 
   let cachedKey: string | null = null
   const encrypted = getSecret(secretName)
   if (encrypted) {
     try {
-      const opened = open(encrypted)
-      if (isUsableBearerKey(opened)) cachedKey = opened
+      const opened = JSON.parse(open(encrypted)) as { key?: unknown; tokenId?: unknown }
+      if (typeof opened.key === 'string' && isUsableBearerKey(opened.key) && opened.tokenId === token?.id) cachedKey = opened.key
       else deleteSecret(secretName)
     } catch {
       deleteSecret(secretName)
     }
   }
 
-  let token = findByName(await client.listTokens())
   if (token && cachedKey) return { name, key: cachedKey, token }
 
-  // Older builds did not persist generated keys. Rotate only our namespaced key
-  // once, because New API installations may mask it on subsequent list calls.
+  // Without a cached key tied to this account and token, rotate only our own
+  // namespaced key: New API installations may mask keys on subsequent list calls.
   if (token) {
     await client.deleteToken(token.id)
     token = undefined
@@ -85,6 +87,6 @@ export async function ensureDedicatedKey(client: BotcfClient, group: string): Pr
   if (!isUsableBearerKey(key)) {
     throw new BotcfError(`BotCF 未返回可用的完整 Key: ${name}`)
   }
-  putSecret(secretName, seal(key))
+  putSecret(secretName, seal(JSON.stringify({ key, tokenId: token.id })))
   return { name, key, token }
 }

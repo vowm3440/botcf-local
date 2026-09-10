@@ -2,11 +2,14 @@ import crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import { diagnosticsCenter, type DiagnosticsCenter } from '../diagnostics/center.js'
+import { config } from '../config.js'
 import { DiagnosticScanner } from '../diagnostics/parse.js'
 import { locateInsideRoot } from '../fsContainment.js'
 import { onShutdown } from '../process/shutdown.js'
-import type { TaskDefinition } from './model.js'
+import { isHeavyTask, type TaskDefinition } from './model.js'
+import type { TaskKind } from '../projectConfig/schema.js'
 import { TaskRun, type TaskLogLine, type TaskRunInfo } from './runner.js'
+import { removeTranscriptFile, transcriptFile } from '../logs/transcripts.js'
 
 /** The unified task system: build, run and test are one mechanism.
  *
@@ -20,6 +23,12 @@ import { TaskRun, type TaskLogLine, type TaskRunInfo } from './runner.js'
 
 export const MAX_CONCURRENT_RUNS = 4
 export const MAX_RUN_HISTORY = 12
+
+/** Concurrency slots a task occupies: heavy work (build/test) takes the whole
+ *  pool, so at most one runs at a time; ordinary tasks share it four-at-a-time. */
+function taskSlots(kind: TaskKind): number {
+  return isHeavyTask(kind) ? MAX_CONCURRENT_RUNS : 1
+}
 
 export interface StartTaskInput {
   task: TaskDefinition
@@ -41,8 +50,16 @@ export class TaskManager extends EventEmitter {
   private activeByTask = new Map<string, string>()
   /** `<rootId>:<taskId>` → run id whose diagnostics a re-run should replace. */
   private lastRunByTask = new Map<string, string>()
+  /** Heavy runs waiting for a free slot, FIFO. */
+  private queue: string[] = []
+  /** Task kind per live run, for slot accounting. */
+  private runKind = new Map<string, TaskKind>()
 
-  constructor(private readonly center: DiagnosticsCenter = diagnosticsCenter) {
+  constructor(
+    private readonly center: DiagnosticsCenter = diagnosticsCenter,
+    /** Where full run transcripts are written (<dataDir>/logs/tasks). */
+    private readonly transcriptsDir?: string
+  ) {
     super()
   }
 
@@ -77,8 +94,18 @@ export class TaskManager extends EventEmitter {
     const key = `${rootId}:${task.id}`
     const running = this.activeRun(rootId, task.id)
     if (running) return { ok: false, status: 409, error: `任务「${task.name}」正在运行中` }
-    if ([...this.runs.values()].filter((run) => run.running).length >= MAX_CONCURRENT_RUNS) {
-      return { ok: false, status: 409, error: `同时最多运行 ${MAX_CONCURRENT_RUNS} 个任务,请先停止一个` }
+    const slots = taskSlots(task.kind)
+    const usedSlots = [...this.runs.values()].reduce(
+      (sum, run) => (run.running ? sum + taskSlots(this.runKind.get(run.id) ?? 'custom') : sum),
+      0
+    )
+    const fits = usedSlots + slots <= MAX_CONCURRENT_RUNS
+    if (!fits && !isHeavyTask(task.kind)) {
+      return {
+        ok: false,
+        status: 409,
+        error: `同时最多运行 ${MAX_CONCURRENT_RUNS} 个普通任务或 1 个重型任务(build/test),请先停止一个或等待`
+      }
     }
     // The task's cwd comes from the project config, so contain it before use.
     const located = locateInsideRoot(rootPath, task.cwd || '.')
@@ -93,8 +120,9 @@ export class TaskManager extends EventEmitter {
       return { ok: false, status: 400, error: `任务工作目录不存在: ${task.cwd || '.'}` }
     }
 
+    const runId = `r${crypto.randomBytes(6).toString('hex')}`
     const run = new TaskRun({
-      id: `r${crypto.randomBytes(6).toString('hex')}`,
+      id: runId,
       taskId: task.id,
       taskName: task.name,
       rootId,
@@ -104,7 +132,8 @@ export class TaskManager extends EventEmitter {
       cwd: located.target,
       env: task.env,
       background: task.background,
-      commandLine: task.commandLine
+      commandLine: task.commandLine,
+      ...(this.transcriptsDir ? { transcriptFile: transcriptFile(this.transcriptsDir, 'tasks', rootId, runId) } : {})
     })
 
     // A fresh run supersedes the previous one's findings for this task.
@@ -113,6 +142,7 @@ export class TaskManager extends EventEmitter {
     this.lastRunByTask.set(key, run.id)
     this.activeByTask.set(key, run.id)
     this.runs.set(run.id, run)
+    this.runKind.set(run.id, task.kind)
     this.pruneHistory()
 
     const scanner = new DiagnosticScanner()
@@ -132,6 +162,8 @@ export class TaskManager extends EventEmitter {
     })
     run.once('end', (info: TaskRunInfo) => {
       this.activeByTask.delete(key)
+      this.queue = this.queue.filter((queuedId) => queuedId !== run.id)
+      this.drainQueue()
       if (info.state === 'failed') {
         // A failure with no parsed diagnostic still belongs in the center —
         // otherwise "exit 1 with unparseable output" would look like success.
@@ -148,7 +180,12 @@ export class TaskManager extends EventEmitter {
       this.emit('runs', this.list())
     })
 
-    run.start()
+    if (fits) {
+      run.start()
+    } else {
+      // Heavy work is serial: wait for the pool instead of refusing the click.
+      this.queue.push(run.id)
+    }
     this.emit('runs', this.list())
     return { ok: true, run }
   }
@@ -163,38 +200,69 @@ export class TaskManager extends EventEmitter {
 
   /** Stop every run started in a directory that just left the workspace. */
   async stopForRoot(rootId: string): Promise<number> {
-    const targets = [...this.runs.values()].filter((run) => run.running && run.info().rootId === rootId)
+    const targets = [...this.runs.values()].filter(
+      (run) => (run.running || run.queued) && run.info().rootId === rootId
+    )
     await Promise.allSettled(targets.map((run) => run.stop()))
     return targets.length
   }
 
   async stopAll(): Promise<void> {
-    await Promise.allSettled([...this.runs.values()].filter((run) => run.running).map((run) => run.stop()))
+    await Promise.allSettled(
+      [...this.runs.values()].filter((run) => run.running || run.queued).map((run) => run.stop())
+    )
   }
 
   /** Forget finished runs (and their diagnostics). */
   clearHistory(): number {
-    const finished = [...this.runs.values()].filter((run) => !run.running)
+    const finished = [...this.runs.values()].filter((run) => !run.running && !run.queued)
     for (const run of finished) {
       this.center.clear({ groupId: run.id })
       this.runs.delete(run.id)
+      this.runKind.delete(run.id)
+      if (this.transcriptsDir) removeTranscriptFile(this.transcriptsDir, 'tasks', run.info().rootId, run.id)
     }
     if (finished.length > 0) this.emit('runs', this.list())
     return finished.length
   }
 
+  /** Start queued heavy runs as slots free up (FIFO). */
+  private drainQueue(): void {
+    let progressed = true
+    while (progressed) {
+      progressed = false
+      const head = this.queue.find((runId) => this.runs.get(runId)?.queued)
+      if (!head) {
+        this.queue = this.queue.filter((runId) => this.runs.has(runId))
+        return
+      }
+      const run = this.runs.get(head)!
+      const used = [...this.runs.values()].reduce(
+        (sum, entry) => (entry.running ? sum + taskSlots(this.runKind.get(entry.id) ?? 'custom') : sum),
+        0
+      )
+      if (used + taskSlots(this.runKind.get(run.id) ?? 'custom') > MAX_CONCURRENT_RUNS) return
+      this.queue = this.queue.filter((queuedId) => queuedId !== run.id)
+      run.start()
+      this.emit('runs', this.list())
+      progressed = true
+    }
+  }
+
   private pruneHistory(): void {
     const finished = [...this.runs.values()]
-      .filter((run) => !run.running)
+      .filter((run) => !run.running && !run.queued)
       .sort((a, b) => a.startedAt - b.startedAt)
     for (const run of finished.slice(0, Math.max(0, this.runs.size - MAX_RUN_HISTORY))) {
       this.center.clear({ groupId: run.id })
       this.runs.delete(run.id)
+      this.runKind.delete(run.id)
+      if (this.transcriptsDir) removeTranscriptFile(this.transcriptsDir, 'tasks', run.info().rootId, run.id)
     }
   }
 }
 
-export const taskManager = new TaskManager()
+export const taskManager = new TaskManager(diagnosticsCenter, config.dataDir)
 
 /** Kill running tasks before the control process dies. */
 export function registerTaskShutdown(manager: TaskManager = taskManager): void {

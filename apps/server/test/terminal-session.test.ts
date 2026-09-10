@@ -1,7 +1,10 @@
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
-import { TerminalSession, type TerminalLine } from '../src/terminal/session.js'
+import { MAX_TERMINAL_LINES, TerminalSession, type TerminalLine } from '../src/terminal/session.js'
 import { defaultShell, isShellKind, kindFromShellPath, resolveShell, shellByKind } from '../src/terminal/shell.js'
 
 /** The terminal drives a real shell over pipes. The contract worth pinning down:
@@ -126,7 +129,7 @@ describe('TerminalSession', () => {
     const child = new FakeShell()
     const session = makeSession(child)
     session.start()
-    child.emit('exit', 0, null)
+    child.emit('close', 0, null)
     await vi.waitFor(() => expect(session.running).toBe(false))
     const result = session.write('ls')
     expect(result).toMatchObject({ ok: false })
@@ -166,5 +169,55 @@ describe('TerminalSession', () => {
     session.start()
     expect(session.running).toBe(false)
     expect(session.snapshot().some((line) => line.text.includes('ENOENT bash'))).toBe(true)
+  })
+
+  it('ends an asynchronous spawn failure and refuses subsequent input', () => {
+    const child = new FakeShell()
+    const session = makeSession(child)
+    const exited = vi.fn()
+    session.on('exit', exited)
+    session.start()
+    child.emit('error', new Error('spawn ENOENT'))
+    child.emit('close', -2, null)
+    expect(session.info()).toMatchObject({ running: false, exitCode: -2 })
+    expect(session.write('echo must-not-run')).toMatchObject({ ok: false })
+    expect(exited).toHaveBeenCalledOnce()
+  })
+
+  it('keeps every line in the transcript file after the ring buffer turns over', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'botcf-term-log-'))
+    try {
+      const file = path.join(dir, 'session.log')
+      const child = new FakeShell()
+      const session = new TerminalSession({
+        id: 't3',
+        rootId: 'r1',
+        rootName: 'app',
+        cwd: '/tmp/app',
+        shell: shellByKind('bash'),
+        transcriptFile: file,
+        spawnProcess: (() => child) as unknown as typeof import('node:child_process').spawn
+      })
+      const seen: string[] = []
+      session.on('line', (line: TerminalLine) => {
+        if (line.kind === 'stdout') seen.push(line.text)
+      })
+      session.start()
+      const total = MAX_TERMINAL_LINES + 50
+      for (let i = 0; i < total; i++) child.stdout.write(`out ${i}\n`)
+      await vi.waitFor(() => expect(seen.length).toBe(total))
+      child.emit('close', 0, null)
+      await vi.waitFor(() => expect(session.running).toBe(false))
+      // The ring buffer dropped the head of the session…
+      expect(session.snapshot().length).toBeLessThan(total)
+      // …while the disk transcript still has every line, in order.
+      const text = fs.readFileSync(file, 'utf8')
+      const fileLines = text.split('\n').filter((line) => line.startsWith('out '))
+      expect(fileLines).toHaveLength(total)
+      expect(fileLines[0]).toBe('out 0')
+      expect(fileLines[total - 1]).toBe(`out ${total - 1}`)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

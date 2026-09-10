@@ -134,3 +134,27 @@ describe('PreviewManager static mode', () => {
     expect(phases).toContain('running')
   })
 })
+
+describe('PreviewManager watcher pause (resource degrader)', () => {
+  it('pauses and resumes the static reload watcher', async () => {
+    const dir = makeSite({ 'index.html': '<html></html>', 'a.css': 'body{}' })
+    manager = new PreviewManager()
+    const reloads: unknown[] = []
+    manager.on('reload', () => reloads.push('reload'))
+    await manager.start({ workdir: dir })
+    expect(manager.getState().running).toBe(true)
+
+    fs.writeFileSync(path.join(dir, 'a.css'), 'body{color:red}')
+    await vi.waitFor(() => expect(reloads.length).toBeGreaterThan(0), { timeout: 5_000 })
+    reloads.length = 0
+
+    manager.pauseWatch()
+    fs.writeFileSync(path.join(dir, 'a.css'), 'body{color:blue}')
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    expect(reloads).toHaveLength(0)
+
+    manager.resumeWatch()
+    fs.writeFileSync(path.join(dir, 'a.css'), 'body{color:green}')
+    await vi.waitFor(() => expect(reloads.length).toBeGreaterThan(0), { timeout: 5_000 })
+  })
+})

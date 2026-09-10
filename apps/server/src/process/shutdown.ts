@@ -4,8 +4,9 @@
  *  the live preview's dev server, task runs, terminal sessions — and each of them
  *  used to install its own signal handler. That does not compose: a handler that
  *  re-raises the signal after its own cleanup cancels everyone else's. So there
- *  is a single installed handler here, all cleanups run together, and the signal
- *  is re-raised once at the end.
+ *  is a single installed handler here. Cleanups run in registration order — the
+ *  same order the resources were acquired — and the signal is re-raised once at
+ *  the end.
  *
  *  Cleanup is bounded: a wedged process tree must not stop the shutdown. */
 
@@ -18,21 +19,28 @@ const CLEANUP_BUDGET_MS = 8_000
 let installed = false
 let shuttingDown = false
 
-/** Run every registered cleanup, ignoring failures; resolves after the budget
- *  even if a handler never settles. */
+/** Run every registered cleanup in registration order, ignoring failures;
+ *  resolves after the budget even if a handler never settles.
+ *
+ *  Order is load-bearing: release must follow acquisition (cancel the in-flight
+ *  AI session before the preview/task/terminal registries tear down their
+ *  processes), so server.ts registers shutdown handlers in that order and they
+ *  run exactly once each, never racing one another. */
 export async function runShutdownHandlers(budgetMs = CLEANUP_BUDGET_MS): Promise<void> {
-  const running = [...handlers].map(async (handler) => {
-    try {
-      await handler()
-    } catch {
-      // A cleanup that fails must not block the others.
-    }
-  })
   const deadline = new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, budgetMs)
     timer.unref?.()
   })
-  await Promise.race([Promise.allSettled(running).then(() => undefined), deadline])
+  const drain = (async () => {
+    for (const handler of [...handlers]) {
+      try {
+        await handler()
+      } catch {
+        // A cleanup that fails must not block the others.
+      }
+    }
+  })()
+  await Promise.race([drain, deadline])
 }
 
 function install(): void {

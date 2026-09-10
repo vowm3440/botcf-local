@@ -4,6 +4,15 @@ import { absorbChangedFile, isMutatingToolName, mergeChangedFiles } from './chan
 import { appendAssistantDelta, appendAssistantReasoning, appendAssistantText, appendNotice, applyToolFrame, attachChangedFiles, type ChatMessage } from './messages'
 import { isOutsideWorkspace } from '../workspace/paths'
 
+/** History restore pages forward from the oldest message (OMP cursors are
+ *  strictly chronological) in bounded requests instead of one giant payload. */
+const HISTORY_PAGE = 200
+/** Safety cap mirroring the legacy server-side drain (rpc.md). */
+const HISTORY_MAX_PAGES = 40
+/** Delta/reasoning frames are coalesced for this long before one setMessages,
+ *  so a fast token stream does not render once per frame. */
+const TEXT_BATCH_MS = 40
+
 /** Everything the assistant conversation *is*, separate from how it looks.
  *
  *  The workbench needs more than a chat pane out of this: the file tree marks the
@@ -60,6 +69,10 @@ export function useChatSession({ route, ompRunning, openFile, activeIsDirty }: C
    *  end-of-turn summary. */
   const [liveChanged, setLiveChanged] = useState<ChangedFileInfo[]>([])
   const abortRef = useRef<AbortController | null>(null)
+  /** Pending delta/reasoning text, batched for TEXT_BATCH_MS and flushed in
+   *  arrival order on the first non-text frame or at the end of the turn. */
+  const textBatchRef = useRef<Array<{ kind: 'delta' | 'reasoning'; text: string }>>([])
+  const textFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** Tool call id → workdir-relative path, remembered from start frames so an end
    *  frame without args can still auto-open the file it changed. */
   const toolPathsRef = useRef(new Map<string, string>())
@@ -79,10 +92,28 @@ export function useChatSession({ route, ompRunning, openFile, activeIsDirty }: C
   )
 
   const loadHistory = useCallback(async () => {
-    const response = await api.history()
-    if (response.source === 'omp') {
-      setMessages(response.messages)
-      if (response.messages.length > 0) setNotice(`已恢复 ${response.messages.length} 条历史消息`)
+    const first = await api.historyPage(undefined, HISTORY_PAGE)
+    // Legacy drain shape (no paging metadata): the whole transcript came back.
+    if (first.totalMessages === undefined) {
+      if (first.source === 'omp') {
+        setMessages(first.messages)
+        if (first.messages.length > 0) setNotice(`已恢复 ${first.messages.length} 条历史消息`)
+      }
+      return
+    }
+    // Paged shape: walk forward one bounded request at a time (OMP cursors are
+    // strictly chronological) so a long session is never restored in one giant
+    // response.
+    let messages = first.messages
+    let cursor = first.nextCursor
+    for (let page = 1; cursor && page < HISTORY_MAX_PAGES; page++) {
+      const next = await api.historyPage(cursor, HISTORY_PAGE)
+      messages = [...messages, ...next.messages]
+      cursor = next.nextCursor
+    }
+    if (first.source === 'omp') {
+      setMessages(messages)
+      if (messages.length > 0) setNotice(`已恢复 ${messages.length} 条历史消息`)
     }
   }, [])
 
@@ -97,6 +128,30 @@ export function useChatSession({ route, ompRunning, openFile, activeIsDirty }: C
     historyLoaded.current = true
     Promise.all([loadHistory(), loadSessions()]).catch(() => undefined)
   }, [loadHistory, loadSessions, ompRunning])
+
+  const flushTextBatch = useCallback((): void => {
+    if (textFlushTimerRef.current !== null) {
+      clearTimeout(textFlushTimerRef.current)
+      textFlushTimerRef.current = null
+    }
+    const batch = textBatchRef.current
+    if (batch.length === 0) return
+    textBatchRef.current = []
+    setMessages((prev) => {
+      let next = prev
+      for (const frame of batch) {
+        next = frame.kind === 'delta' ? appendAssistantDelta(next, frame.text) : appendAssistantReasoning(next, frame.text)
+      }
+      return next
+    })
+  }, [])
+
+  const queueTextFrame = useCallback((kind: 'delta' | 'reasoning', text: string): void => {
+    textBatchRef.current.push({ kind, text })
+    if (textFlushTimerRef.current === null) {
+      textFlushTimerRef.current = setTimeout(flushTextBatch, TEXT_BATCH_MS)
+    }
+  }, [flushTextBatch])
 
   const onToolEvent = (ev: StreamEvent): void => {
     if (!ev.id || !ev.name || !ev.phase) return
@@ -154,13 +209,16 @@ export function useChatSession({ route, ompRunning, openFile, activeIsDirty }: C
 
   const onEvent = (ev: StreamEvent): void => {
     if (ev.type === 'delta' && ev.text) {
-      const text = ev.text
-      setMessages((prev) => appendAssistantDelta(prev, text))
+      queueTextFrame('delta', ev.text)
+      return
     }
     if (ev.type === 'reasoning' && ev.text) {
-      const text = ev.text
-      setMessages((prev) => appendAssistantReasoning(prev, text))
+      queueTextFrame('reasoning', ev.text)
+      return
     }
+    // Chrome (notices, tools, usage, terminal frames) must not wait behind a
+    // token batch: flush anything pending before handling it in order.
+    flushTextBatch()
     if (ev.type === 'notice' && ev.text) {
       const notice = { level: ev.level === 'warn' ? ('warn' as const) : ('info' as const), text: ev.text }
       setMessages((prev) => appendNotice(prev, notice))
@@ -214,11 +272,13 @@ export function useChatSession({ route, ompRunning, openFile, activeIsDirty }: C
     try {
       await streamChat(nextMessages.map(({ role, content }) => ({ role, content })), onEvent, controller.signal)
     } catch (error) {
+      flushTextBatch()
       const suffix = controller.signal.aborted
         ? '\n\n[已中止]'
         : `\n\n[错误] ${error instanceof Error ? error.message : String(error)}`
       setMessages((prev) => appendAssistantText(prev, (content) => content + suffix))
     } finally {
+      flushTextBatch()
       setStreaming(false)
       abortRef.current = null
       loadSessions().catch(() => undefined)

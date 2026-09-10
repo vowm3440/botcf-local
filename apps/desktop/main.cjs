@@ -14,6 +14,8 @@ const SERVER_URL = `http://127.0.0.1:${PORT}`
 
 let serverProc = null
 let mainWindow = null
+let quitting = false
+let shutdownPending = false
 
 async function resolveSystemProxyEnv() {
   if (process.env.HTTPS_PROXY || process.env.https_proxy) return {}
@@ -58,14 +60,15 @@ function startServer(networkEnv = {}) {
     command = process.platform === 'win32' ? 'node.exe' : 'node'
   }
 
-  serverProc = spawn(command, [entry], { env, stdio: 'inherit', shell: false })
+  serverProc = spawn(command, [entry], { env, stdio: ['inherit', 'inherit', 'inherit', 'ipc'], shell: false })
   serverProc.on('error', (err) => {
+    serverProc = null
     dialog.showErrorBox('无法启动本地服务', `${err.message}\n${packaged ? '' : '开发模式需要系统已安装 Node.js 22+ 且在 PATH 中。'}`)
     app.quit()
   })
   serverProc.on('exit', (code) => {
     serverProc = null
-    if (code !== 0 && code !== null && mainWindow) {
+    if (!quitting && code !== 0 && code !== null && mainWindow) {
       dialog.showErrorBox('BotCF 本地服务异常退出', `退出码 ${code},请查看日志。`)
     }
   })
@@ -80,7 +83,7 @@ function waitForHealth(retries = 50) {
         retry(left)
       })
       req.on('error', () => retry(left))
-      req.setTimeout(1000, () => { req.destroy(); retry(left) })
+      req.setTimeout(1000, () => req.destroy())
     }
     const retry = (left) => {
       if (left <= 0) return reject(new Error('本地服务启动超时'))
@@ -131,14 +134,18 @@ if (!gotLock) {
   })
 
   app.whenReady().then(async () => {
-    startServer(await resolveSystemProxyEnv())
+    const networkEnv = await resolveSystemProxyEnv()
+    if (quitting) return
+    startServer(networkEnv)
     try {
       await waitForHealth()
     } catch (err) {
+      if (quitting) return
       dialog.showErrorBox('启动失败', String(err))
       app.quit()
       return
     }
+    if (quitting) return
     createWindow()
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -149,10 +156,34 @@ if (!gotLock) {
     app.quit()
   })
 
-  app.on('before-quit', () => {
-    if (serverProc) {
-      serverProc.kill()
+  app.on('before-quit', (event) => {
+    quitting = true
+    if (!serverProc) return
+    event.preventDefault()
+    if (shutdownPending) return
+    shutdownPending = true
+    const child = serverProc
+    const forceStop = () => {
+      if (child.exitCode !== null) return
+      if (process.platform === 'win32') {
+        // Windows kill() skips Node's signal handlers; kill the tree only if
+        // the IPC shutdown did not finish within the server's cleanup budget.
+        const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
+        killer.on('error', () => child.kill())
+      } else {
+        child.kill('SIGKILL')
+      }
+    }
+    const timer = setTimeout(forceStop, 10_000)
+    child.once('exit', () => {
+      clearTimeout(timer)
       serverProc = null
+      app.quit()
+    })
+    if (child.connected) {
+      child.send({ type: 'shutdown' }, (error) => { if (error) forceStop() })
+    } else {
+      forceStop()
     }
   })
 }

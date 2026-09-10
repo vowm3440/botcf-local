@@ -1,0 +1,352 @@
+{
+  "when": "2026-09-07T04:05:11.481Z",
+  "env": {
+    "platform": "win32 10.0.26100",
+    "cpus": 32,
+    "totalMemMiB": 15583,
+    "electron": "43.4.0",
+    "chrome": "150.0.7871.224",
+    "node": "24.18.1",
+    "windowShown": true,
+    "gcMarks": false,
+    "budgetMs": {
+      "total": 480000,
+      "serverHealth": 30000,
+      "pageLoad": 60000,
+      "baseline": 30000,
+      "baselineSettle": 3000,
+      "drive": 300000,
+      "driveSlack": 20000,
+      "frame": 5000,
+      "settle": 10000,
+      "releaseSettle": 3000
+    }
+  },
+  "fixture": {
+    "dir": "C:\\Users\\ILH\\AppData\\Local\\Temp\\botcf-perf-editor",
+    "files": [
+      "module-1.ts",
+      "module-2.ts",
+      "module-3.ts",
+      "module-4.ts",
+      "module-5.ts",
+      "module-6.ts",
+      "module-7.ts",
+      "module-8.ts"
+    ],
+    "lines": 12001,
+    "bytesPerFile": 948079,
+    "diffRegionsPerFile": 350,
+    "diffBytesPerFile": 163921,
+    "expandable": "expandable.ts",
+    "expandableLines": 3600,
+    "expandableRegions": 120
+  },
+  "drive": {
+    "tabs": 8,
+    "dirtyTabs": 4,
+    "heapMarks": {
+      "beforeOpen": {
+        "usedMiB": 2.6,
+        "totalMiB": 6.2
+      },
+      "afterOpen": {
+        "usedMiB": 18.9,
+        "totalMiB": 28.7
+      },
+      "afterTyping": {
+        "usedMiB": 22.2,
+        "totalMiB": 28.7
+      },
+      "afterSwitching": {
+        "usedMiB": 88.4,
+        "totalMiB": 111.8
+      },
+      "afterClose": {
+        "usedMiB": 88.4,
+        "totalMiB": 111.8
+      },
+      "afterDeliver": {
+        "usedMiB": 74.8,
+        "totalMiB": 115.9
+      },
+      "afterInline": {
+        "usedMiB": 21.2,
+        "totalMiB": 63.4
+      },
+      "afterInlineFull": {
+        "usedMiB": 26.9,
+        "totalMiB": 64.6
+      },
+      "afterInlineClose": {
+        "usedMiB": 26.9,
+        "totalMiB": 64.6
+      }
+    },
+    "viewersWithEightTabs": 1,
+    "viewersAfterClose": 0,
+    "framesDelivered": 158,
+    "open": {
+      "samples": 8,
+      "p50": 32.9,
+      "p95": 54.9,
+      "max": 54.9
+    },
+    "openFirst": 54.9,
+    "openSteady": {
+      "samples": 7,
+      "p50": 32.9,
+      "p95": 51.1,
+      "max": 51.1
+    },
+    "inputBlock": {
+      "samples": 30,
+      "p50": 0.5,
+      "p95": 0.7,
+      "max": 0.7
+    },
+    "inputFrame": {
+      "samples": 30,
+      "p50": 6,
+      "p95": 6.4,
+      "max": 6.4
+    },
+    "inputPaint": {
+      "samples": 30,
+      "p50": 12.1,
+      "p95": 12.7,
+      "max": 13
+    },
+    "burst": {
+      "size": 6,
+      "paint": {
+        "samples": 6,
+        "p50": 5.8,
+        "p95": 7.7,
+        "max": 7.7
+      },
+      "paintWithForcedLayout": {
+        "samples": 6,
+        "p50": 6.1,
+        "p95": 6.7,
+        "max": 6.7
+      }
+    },
+    "tabSwitch": {
+      "samples": 24,
+      "p50": 24.1,
+      "p95": 35.4,
+      "max": 36.6
+    },
+    "inline": {
+      "deliverMs": 51.799999952316284,
+      "contentMs": 23.200000047683716,
+      "showMs": 25,
+      "rowsTotal": 3150,
+      "rowsMountedPeak": 152,
+      "scrollHeightPx": 56700,
+      "scrolledToPx": 51834,
+      "fullCollapsedRows": 1079,
+      "fullShowMs": 18.200000047683716,
+      "fullRowsTotal": 3721,
+      "fullRowsMountedPeak": 152,
+      "scroll": {
+        "samples": 12,
+        "p50": 6,
+        "p95": 10.7,
+        "max": 10.7
+      }
+    },
+    "inputBreakdown": {
+      "browserEdit": {
+        "samples": 30,
+        "p50": 0.5,
+        "p95": 0.7,
+        "max": 0.7
+      },
+      "react": {
+        "samples": 30,
+        "p50": 0,
+        "p95": 0.1,
+        "max": 0.1
+      }
+    }
+  },
+  "memory": {
+    "rendererBaselineMiB": 99.5,
+    "rendererPeakMiB": 216.3,
+    "rendererLoadPeakMiB": 186.4,
+    "rendererInlinePeakMiB": 216.3,
+    "rendererPrivatePeakMiB": 0,
+    "treePeakMiB": 507,
+    "rendererAfterCloseMiB": 190,
+    "loadDeltaMiB": 86.9,
+    "inlineDeltaMiB": 116.8,
+    "retainedDeltaMiB": 90.6,
+    "releasedAfterCloseMiB": 26.2,
+    "jsHeapBaselineMiB": 2.6,
+    "jsHeapAfterCloseMiB": 9.9,
+    "jsHeapCommittedPeakMiB": 115.9,
+    "jsHeapRetainedMiB": 7.2,
+    "collectedBeforeSample": true
+  },
+  "baseline": {
+    "source": "docs/test-report-2026-08-24.md · P2-004",
+    "configuration": "A DIFFERENT CONFIGURATION from this harness. Those numbers came from the user's real environment — 8 workspace roots, a real OMP agent, a real session — while the gate runs a fresh data directory, one root, the updater pointed at a dead proxy and no agent process. Only the shape of the regression is comparable; the absolute MiB are not. Reading this block as if it described the gate's own starting point is what once produced the claim that `released after close >= 80 MiB` was unsatisfiable by construction. It is not: the gate measures its own empty workbench every run (`rendererBaselineMiB`, ~96 MiB of renderer), and against that the eight tabs added ~400 MiB before the text surface was virtualised.",
+    "shortInputMs": [
+      714,
+      904
+    ],
+    "treePeakWorkingSetMiB": 1453.4,
+    "treePeakPrivateMiB": 1606.9,
+    "releasedWithin10sMiB": 0,
+    "mountedViewersWithEightTabs": 8
+  },
+  "gate": [
+    {
+      "name": "mounted viewers with 8 tabs",
+      "value": 1,
+      "limit": 1,
+      "unit": "",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "input → painted P95",
+      "value": 12.7,
+      "limit": 40,
+      "unit": "ms",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "input → painted max",
+      "value": 13,
+      "limit": 100,
+      "unit": "ms",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "open first tab",
+      "value": 54.9,
+      "limit": 120,
+      "unit": "ms",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "open per tab P95 (steady)",
+      "value": 51.1,
+      "limit": 80,
+      "unit": "ms",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "tab switch P95",
+      "value": 35.4,
+      "limit": 120,
+      "unit": "ms",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "inline rows modelled",
+      "value": 3150,
+      "limit": 2500,
+      "unit": "",
+      "cmp": "min",
+      "ok": true
+    },
+    {
+      "name": "inline rows in the DOM",
+      "value": 152,
+      "limit": 300,
+      "unit": "",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "inline expanded rows modelled",
+      "value": 3721,
+      "limit": 3000,
+      "unit": "",
+      "cmp": "min",
+      "ok": true
+    },
+    {
+      "name": "inline expanded rows in the DOM",
+      "value": 152,
+      "limit": 300,
+      "unit": "",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "inline → painted",
+      "value": 25,
+      "limit": 80,
+      "unit": "ms",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "inline scroll P95",
+      "value": 10.7,
+      "limit": 35,
+      "unit": "ms",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "renderer peak working set",
+      "value": 216.3,
+      "limit": 360,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "load over empty workbench",
+      "value": 86.9,
+      "limit": 160,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "inline load over empty workbench",
+      "value": 116.8,
+      "limit": 240,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "JS heap committed peak",
+      "value": 115.9,
+      "limit": 160,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "retained after close",
+      "value": 90.6,
+      "limit": 140,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    },
+    {
+      "name": "JS heap retained after close",
+      "value": 7.2,
+      "limit": 10,
+      "unit": "MiB",
+      "cmp": "max",
+      "ok": true
+    }
+  ],
+  "pass": true
+}

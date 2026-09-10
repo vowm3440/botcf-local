@@ -10,7 +10,7 @@ import { getJson, postJson, query } from './http'
 
 export type TaskKind = 'build' | 'run' | 'test' | 'lint' | 'custom'
 
-export type TaskRunState = 'running' | 'succeeded' | 'failed' | 'stopped'
+export type TaskRunState = 'queued' | 'running' | 'succeeded' | 'failed' | 'stopped'
 
 export interface TaskRunInfo {
   id: string

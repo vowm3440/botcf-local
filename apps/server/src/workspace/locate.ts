@@ -9,6 +9,7 @@ import {
   type Workspace,
   type WorkspaceRoot
 } from './model.js'
+import type { RootRuntimeRootSnapshot } from './rootRuntime.js'
 
 /** Resolve a qualified workspace path (`<rootName>/<relative>`) to a real file.
  *
@@ -95,23 +96,30 @@ export function locateWorkspacePath(workspace: Workspace, requested: string): Wo
 
 /** Wire shape for a root: the model plus the two facts only the filesystem and
  *  the workspace as a whole can answer. A root whose directory disappeared stays
- *  listed (flagged `exists: false`) so the user can remove it deliberately. */
+ *  listed (flagged `exists: false`) so the user can remove it deliberately.
+ *  `runtime` is merged in when the caller has the controller's snapshot handy —
+ *  it drives the lifecycle badge and the pin button in the file panel. */
 export interface WorkspaceRootInfo {
   id: string
   name: string
   path: string
   exists: boolean
   primary: boolean
+  runtime?: RootRuntimeRootSnapshot
 }
 
-export function workspaceRootInfos(workspace: Workspace): WorkspaceRootInfo[] {
-  return workspace.roots.map((root) => ({
-    id: root.id,
-    name: root.name,
-    path: root.path,
-    exists: directoryExists(root.path),
-    primary: root.id === workspace.primaryId
-  }))
+export function workspaceRootInfos(workspace: Workspace, runtimeById?: Map<string, RootRuntimeRootSnapshot>): WorkspaceRootInfo[] {
+  return workspace.roots.map((root) => {
+    const info: WorkspaceRootInfo = {
+      id: root.id,
+      name: root.name,
+      path: root.path,
+      exists: directoryExists(root.path),
+      primary: root.id === workspace.primaryId
+    }
+    const runtime = runtimeById?.get(root.id)
+    return runtime ? { ...info, runtime } : info
+  })
 }
 
 function directoryExists(dir: string): boolean {

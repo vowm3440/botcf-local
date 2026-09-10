@@ -9,6 +9,7 @@ import {
   parseLog,
   parseStatusPorcelain,
   synthesizeAddedDiff,
+  type GitBranchInfo,
   type GitCommit,
   type GitStatusEntry
 } from './porcelain.js'
@@ -116,9 +117,78 @@ async function headCommit(rootPath: string): Promise<GitCommit | null> {
   return parseLog(result.stdout)[0] ?? null
 }
 
+/** Refresh coalescing (plan §5): several workspace roots can sit inside one git
+ *  repository, and file-change bursts refresh every panel at once. The status of
+ *  a repository is therefore read once per top level — concurrent refreshes
+ *  share the same in-flight `git status`, and a completed snapshot is reused for
+ *  a short window so a burst degrades into a single run. Every mutating git
+ *  operation drops its repository's snapshot on entry, so a refresh right after
+ *  a commit can never be served stale data. */
+export const GIT_STATUS_COALESCE_MS = 150
+/** Whole-repository entry cap; per-root views truncate at MAX_STATUS_ENTRIES. */
+const MAX_REPO_STATUS_ENTRIES = 20_000
+
+interface RepoStatusSnapshot {
+  branch: GitBranchInfo
+  /** Repository-top-level-relative entries, not yet anchored to a root. */
+  entries: GitStatusEntry[]
+  head: GitCommit | null
+}
+
+const repoStatusCache = new Map<
+  string,
+  { at: number; promise: Promise<GitOutcome<RepoStatusSnapshot>> | null; snapshot: RepoStatusSnapshot | null }
+>()
+
+/** Drop a repository's memoised status (called when the app itself changed the
+ *  working tree, so the next refresh is a real read, not a stale reuse). */
+export function invalidateRepoStatus(topLevel: string): void {
+  if (topLevel) repoStatusCache.delete(topLevel)
+}
+
+/** One `git status` per repository top level, shared by every root inside it. */
+async function repoStatus(topLevel: string): Promise<GitOutcome<RepoStatusSnapshot>> {
+  const entry = repoStatusCache.get(topLevel)
+  const cached = entry?.snapshot && Date.now() - entry.at <= GIT_STATUS_COALESCE_MS ? entry.snapshot : null
+  if (cached) return { ok: true, data: cached }
+  if (entry?.promise) return entry.promise
+
+  const promise: Promise<GitOutcome<RepoStatusSnapshot>> = (async () => {
+    const result = await runGit(topLevel, ['status', '--porcelain=v1', '-z', '-b', '--untracked-files=all'])
+    if (!result.ok) return fail(500, result.stderr.trim().slice(0, 300) || 'git status 失败')
+    const parsed = parseStatusPorcelain(result.stdout)
+    const snapshot: RepoStatusSnapshot = {
+      branch: parsed.branch,
+      entries: parsed.entries.slice(0, MAX_REPO_STATUS_ENTRIES),
+      head: parsed.branch.unborn ? null : await headCommit(topLevel)
+    }
+    repoStatusCache.set(topLevel, { at: Date.now(), promise: null, snapshot })
+    return { ok: true, data: snapshot }
+  })()
+  repoStatusCache.set(topLevel, { at: 0, promise, snapshot: null })
+  try {
+    return await promise
+  } finally {
+    const current = repoStatusCache.get(topLevel)
+    if (current?.promise === promise) {
+      repoStatusCache.set(topLevel, { at: current.at, promise: null, snapshot: current.snapshot })
+    }
+  }
+}
+
+/** True when a repository-relative path sits inside a root's prefix. The prefix
+ *  comes from git rev-parse --show-prefix and ends with a slash (e.g. 'pkg/'),
+ *  so directory entries and file entries need the same trimmed base. */
+function insidePrefix(prefix: string, repoPath: string): boolean {
+  if (!prefix) return true
+  const dir = prefix.replace(/\/+$/, '')
+  return repoPath === dir || repoPath.startsWith(dir + '/')
+}
+
+
 export async function statusOf(rootPath: string): Promise<GitOutcome<GitStatusPayload>> {
   const info = await repoInfo(rootPath)
-  if (!info.installed || !info.repository) {
+  if (!info.installed || !info.repository || !info.topLevel) {
     return {
       ok: true,
       data: {
@@ -134,27 +204,27 @@ export async function statusOf(rootPath: string): Promise<GitOutcome<GitStatusPa
       }
     }
   }
-  // `-- .` keeps a monorepo package's panel to its own subtree; paths are still
-  // repository-relative, so they are re-anchored below.
-  const args = ['status', '--porcelain=v1', '-z', '-b', '--untracked-files=all']
-  if (info.prefix) args.push('--', '.')
-  const result = await runGit(rootPath, args)
-  if (!result.ok) return fail(500, result.stderr.trim().slice(0, 300) || 'git status 失败')
-  const snapshot = parseStatusPorcelain(result.stdout)
-  const anchored = snapshot.entries.map((entry) => anchorEntry(info.prefix, entry))
+  const snapshot = await repoStatus(info.topLevel)
+  if (!snapshot.ok) return snapshot
+  // One whole-repository read serves every root inside it: a root's view is the
+  // subset of entries under its prefix, anchored the way a `git status -- .`
+  // run in that directory used to be.
+  const anchored = snapshot.data.entries
+    .filter((entry) => insidePrefix(info.prefix, entry.path))
+    .map((entry) => anchorEntry(info.prefix, entry))
   const entries = anchored.slice(0, MAX_STATUS_ENTRIES)
   return {
     ok: true,
     data: {
       info,
-      branch: snapshot.branch,
+      branch: snapshot.data.branch,
       entries,
       truncated: anchored.length > entries.length,
       stagedCount: anchored.filter((entry) => entry.staged).length,
       unstagedCount: anchored.filter((entry) => entry.unstaged && !entry.untracked).length,
       untrackedCount: anchored.filter((entry) => entry.untracked).length,
       conflictedCount: anchored.filter((entry) => entry.conflicted).length,
-      head: snapshot.branch.unborn ? null : await headCommit(rootPath)
+      head: snapshot.data.head
     }
   }
 }
@@ -257,6 +327,7 @@ export async function diffOf(
 export async function stagePaths(rootPath: string, relPaths: readonly unknown[]): Promise<GitOutcome<{ paths: string[] }>> {
   const repo = await requireRepo(rootPath)
   if (!repo.ok) return repo
+  invalidateRepoStatus(repo.data.topLevel ?? '')
   const validated = validatePaths(rootPath, relPaths)
   if (!validated.ok) return validated
   // `--all` records deletions too, so staging a deleted file works like the rest.
@@ -268,6 +339,8 @@ export async function stagePaths(rootPath: string, relPaths: readonly unknown[])
 export async function unstagePaths(rootPath: string, relPaths: readonly unknown[]): Promise<GitOutcome<{ paths: string[] }>> {
   const repo = await requireRepo(rootPath)
   if (!repo.ok) return repo
+  const topLevel = repo.data.topLevel ?? ''
+  invalidateRepoStatus(topLevel)
   const validated = validatePaths(rootPath, relPaths)
   if (!validated.ok) return validated
   const status = await statusOf(rootPath)
@@ -279,6 +352,7 @@ export async function unstagePaths(rootPath: string, relPaths: readonly unknown[
     : ['reset', '-q', '--', ...validated.data]
   const result = await runGit(rootPath, args)
   if (!result.ok) return fail(500, result.stderr.trim().slice(0, 300) || 'git reset 失败')
+  invalidateRepoStatus(topLevel)
   return { ok: true, data: { paths: validated.data } }
 }
 
@@ -300,6 +374,8 @@ export async function discardPaths(
 ): Promise<GitOutcome<DiscardOutcome>> {
   const repo = await requireRepo(rootPath)
   if (!repo.ok) return repo
+  const topLevel = repo.data.topLevel ?? ''
+  invalidateRepoStatus(topLevel)
   const validated = validatePaths(rootPath, relPaths)
   if (!validated.ok) return validated
   const status = await statusOf(rootPath)
@@ -361,12 +437,22 @@ export async function discardPaths(
       continue
     }
     try {
-      fs.rmSync(located.target, { recursive: true, force: true })
+      // Delete the directory entry, never its resolved target. Also refuse an
+      // alias in an ancestor: `junction/file` would otherwise delete the real
+      // file even when rm is given the lexical path.
+      const lexicalTarget = path.resolve(fs.realpathSync.native(rootPath), target)
+      const parent = locateInsideRoot(rootPath, path.dirname(lexicalTarget))
+      if (parent.status !== 'ok' || path.relative(parent.target, path.dirname(lexicalTarget)) !== '') {
+        outcome.skipped.push({ path: target, reason: 'unchanged' })
+        continue
+      }
+      fs.rmSync(lexicalTarget, { recursive: true, force: true })
       outcome.deleted.push(target)
     } catch {
       outcome.skipped.push({ path: target, reason: 'unchanged' })
     }
   }
+  invalidateRepoStatus(topLevel)
   return { ok: true, data: outcome }
 }
 
@@ -382,6 +468,8 @@ export async function commitStaged(
 ): Promise<GitOutcome<CommitPayload>> {
   const repo = await requireRepo(rootPath)
   if (!repo.ok) return repo
+  const topLevel = repo.data.topLevel ?? ''
+  invalidateRepoStatus(topLevel)
   const text = typeof message === 'string' ? message.trim() : ''
   if (!text) return fail(400, '提交信息不能为空')
   if (text.length > MAX_COMMIT_MESSAGE_CHARS) return fail(400, `提交信息超过 ${MAX_COMMIT_MESSAGE_CHARS} 字符`)
@@ -415,6 +503,7 @@ export async function commitStaged(
     }
     return fail(500, stderr.trim().slice(0, 500) || 'git commit 失败')
   }
+  invalidateRepoStatus(topLevel)
   return { ok: true, data: { commit: await headCommit(rootPath), staged: status.data.stagedCount } }
 }
 
@@ -448,6 +537,8 @@ export async function undoLastCommit(
 ): Promise<GitOutcome<{ mode: UndoMode; head: GitCommit | null }>> {
   const repo = await requireRepo(rootPath)
   if (!repo.ok) return repo
+  const topLevel = repo.data.topLevel ?? ''
+  invalidateRepoStatus(topLevel)
   const status = await statusOf(rootPath)
   if (!status.ok) return status
   if (status.data.branch.unborn || !status.data.head) return fail(409, '还没有提交可以撤销')
@@ -460,6 +551,7 @@ export async function undoLastCommit(
   }
   const result = await runGit(rootPath, ['reset', `--${mode}`, 'HEAD~1'])
   if (!result.ok) return fail(500, result.stderr.trim().slice(0, 300) || 'git reset 失败')
+  invalidateRepoStatus(topLevel)
   return { ok: true, data: { mode, head: await headCommit(rootPath) } }
 }
 
@@ -468,6 +560,7 @@ export async function undoLastCommit(
 export async function revertCommit(rootPath: string, hash: string): Promise<GitOutcome<{ head: GitCommit | null }>> {
   const repo = await requireRepo(rootPath)
   if (!repo.ok) return repo
+  invalidateRepoStatus(repo.data.topLevel ?? '')
   if (typeof hash !== 'string' || !COMMIT_HASH.test(hash.trim())) return fail(400, '提交 hash 格式不正确')
   const result = await runGit(rootPath, ['revert', '--no-edit', hash.trim()])
   if (!result.ok) {
@@ -483,6 +576,7 @@ export async function revertCommit(rootPath: string, hash: string): Promise<GitO
 export async function abortRevert(rootPath: string): Promise<GitOutcome<{ aborted: true }>> {
   const repo = await requireRepo(rootPath)
   if (!repo.ok) return repo
+  invalidateRepoStatus(repo.data.topLevel ?? '')
   const result = await runGit(rootPath, ['revert', '--abort'])
   if (!result.ok) return fail(409, result.stderr.trim().slice(0, 300) || '当前没有进行中的回滚')
   return { ok: true, data: { aborted: true } }

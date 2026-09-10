@@ -191,3 +191,38 @@ watchdog 走同一条路径,并照常清理窗口、服务、夹具和临时数�
 - 引导代码(构建检查、服务、窗口、清理)在 `harness/app.cjs`,和 `e2e/` 共用;那边端口和
   数据目录都错开,两者可以同时跑。
 
+## perf:workspace — 多目录生命周期资源门槛
+
+`npm run perf:workspace`
+
+同一份引导(构建 → 服务 → 真实窗口 → 清理,`harness/app.cjs`)下的**服务端资源**
+门槛:阶段 3 的资源层(root 状态机、OMP 池)和阶段 5 的回收都活在服务进程里,这一条命令
+把"8 个目录打开、50 次开关循环"跑在真实服务与真实工作台上,量:
+
+| 指标 | 含义 |
+|---|---|
+| `server.baselineMiB` / `atRoots` | 空工作台与 1 / 4 / 8 根打开时服务进程 RSS(仅服务子进程,不含 Electron)。 |
+| `server.perRootServerMiB` | (8 根 − 1 根)/ 7:每多开一个目录服务端要多付多少。 |
+| `churn.*` | 50 次「加一个根 → 立刻移除」前后服务的 RSS / Windows 句柄差。这是泄漏判定:每次循环都要建/拆 runtime 状态与 store 条目,留着不还就会在这里露头。 |
+| `renderer.peakMiB` / `jsHeapRetainedMiB` | 渲染进程工作集峰值,以及全部循环结束后强制回收再读的 JS 堆增量(同 editor gate 的判定哲学:回收后仍在 = 保留,不是分配器没还页)。 |
+| `snapshot` | 结束时 `/api/workspace/runtime` 的 root 数、池容量/占用、queued。**`running ≤ capacity` 是不变量**,每条样本都必须满足。 |
+
+判定写 `perf/thresholds.json` 的 `workspace.gate`,结果写 `perf/last-workspace-run.json`。
+阈值绑定机器(型号/核数/内存)记录在结果文件的 `env` 里;换机器先跑三遍干净运行再校准。
+
+默认隐藏窗口(这里不量帧延迟,没有盖住桌面的理由):`--show` 可见,`--no-show`
+隐藏。参数:`--roots <n>`(≤8)、`--cycles <n>`(≤200)、`--budget <ms>`、`--keep`。
+
+### 边界(和 editor gate 不同的地方)
+
+- **不驱动 OMP 本体**:harness 把更新器指向死代理,任何 agent 都起不来,池会以
+  `running: 0` 回答一个与代码无关的原因。池容量不变量仍每条都查;真 agent 进程的
+  起停/回收账目由 `workspace/runtime` 单测覆盖,连真实二进制的验收在能联网的
+  Electron 会话里做(阶段 6 场景 1)。
+- **重型任务串行与 watcher 批次有界不在这一条里复测**:`tasks-manager.test.ts` 与
+  `watcher-rescan.test.ts` 已把「两个 build 串行」和「pending 溢出转全量 rescan」固定成
+  单元验收;这里是它们之上的总量门槛,不是它们的替身。
+- Windows 句柄只对服务子进程采样(PowerShell `Get-Process`);POSIX 用 `/proc/<pid>/fd`
+  计数。句柄数会随环境基线漂移,所以判定用**增量**(循环后 − 循环前),不是绝对值。
+- 与 `perf:editor`、`test:e2e` 端口/数据目录错开,可同时跑;同样不碰用户自己的数据
+  目录与工作区。
